@@ -37,7 +37,9 @@ ga pull         # pull remote agents to local
 ga push         # push local agents to remote
 ```
 
-## First run
+## Features
+
+### Setup
 
 On first launch, `ga` walks you through setup:
 
@@ -46,7 +48,7 @@ On first launch, `ga` walks you through setup:
 3. **Custom git path** — provide any accessible git remote URL
 4. Clones the repo to `~/.git-agents` and saves your config
 
-## Pull / Push
+### Pull / Push
 
 Both operations show a comparison summary before doing anything:
 
@@ -64,7 +66,7 @@ Both operations show a comparison summary before doing anything:
 
 **No is always the default** — nothing happens unless you explicitly confirm.
 
-## Edit config
+### Edit config
 
 Select **Edit Config** from the main menu to reconfigure your remote at any time.
 
