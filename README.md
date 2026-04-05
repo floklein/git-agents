@@ -1,12 +1,26 @@
 # git-agents
 
-A terminal UI tool to sync your Claude Code agents and skills across machines using git.
+A terminal UI tool to sync your AI agents and skills across machines using git.
 
 ## What it does
 
 `ga` keeps your `~/.agents` directory in sync with a remote git repository — so your custom skills follow you everywhere.
 
 ## Install
+
+```bash
+bun install --global git-agents
+```
+
+Or with npm:
+
+```bash
+npm install --global git-agents
+```
+
+> **Requires [Bun](https://bun.sh)** — install it first if you haven't already.
+
+### From source
 
 ```bash
 bun install

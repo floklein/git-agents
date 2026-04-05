@@ -1,25 +1,42 @@
 {
   "name": "git-agents",
-  "module": "src/index.tsx",
+  "version": "0.1.0",
+  "description": "TUI CLI to sync your AI agents and skills across machines using git",
   "type": "module",
-  "private": true,
-  "bin": {
-    "ga": "src/index.tsx",
-    "git-agents": "src/index.tsx"
+  "license": "MIT",
+  "author": "Florent Klein",
+  "keywords": [
+    "git",
+    "tui",
+    "cli",
+    "claude",
+    "agents",
+    "skills",
+    "sync",
+    "worktree"
+  ],
+  "engines": {
+    "bun": ">=1.0.0"
   },
+  "bin": {
+    "ga": "dist/index.js",
+    "git-agents": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "dev": "bun run --watch src/index.tsx",
-    "start": "bun src/index.tsx"
+    "start": "bun src/index.tsx",
+    "build": "bun scripts/build.ts",
+    "prepublishOnly": "bun run build"
   },
   "devDependencies": {
-    "@types/bun": "latest"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
-  },
-  "dependencies": {
     "@opentui/core": "^0.1.95",
     "@opentui/react": "^0.1.95",
-    "react": "^19.2.4"
+    "@types/bun": "latest",
+    "react": "^19.2.4",
+    "typescript": "^5"
   }
 }
