@@ -8,6 +8,12 @@ Supports **OpenCode**, **Claude Code**, **Codex**, **Cursor**, and [41 more](#su
 
 `ga` keeps your AI agent directories in sync with a remote git repository — so your custom skills follow you everywhere.
 
+## Quick start
+
+```bash
+bunx git-agents@latest
+```
+
 ## Install
 
 ```bash
