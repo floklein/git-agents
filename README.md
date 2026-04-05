@@ -17,20 +17,25 @@ bunx git-agents@latest
 ## Install
 
 ```bash
-bun install --global git-agents
+bun i -g git-agents
 ```
 
 Or with npm:
 
 ```bash
-npm install --global git-agents
+npm i -g git-agents
 ```
 
-> **Requires [Bun](https://bun.sh)** — install it first if you haven't already.
+> **Requires [Bun](https://bun.sh)** — install it first if you haven't already:
+> ```bash
+> curl -fsSL https://bun.sh/install | bash
+> ```
 
 ### From source
 
 ```bash
+git clone https://github.com/floklein/git-agents.git
+cd git-agents
 bun install
 bun link   # makes `ga` and `git-agents` available globally
 ```
