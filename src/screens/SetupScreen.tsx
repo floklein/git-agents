@@ -232,6 +232,7 @@ export function SetupScreen({ existingConfig, onComplete }: Props) {
             }
           }}
           width={50}
+          height={4}
         />
         <text attributes={TextAttributes.DIM}>↑↓ navigate  Enter select</text>
       </box>
@@ -282,6 +283,7 @@ export function SetupScreen({ existingConfig, onComplete }: Props) {
             else setStep("choose-remote");
           }}
           width={50}
+          height={4}
         />
       </box>
     );
@@ -314,6 +316,7 @@ export function SetupScreen({ existingConfig, onComplete }: Props) {
             else setStep("choose-remote");
           }}
           width={40}
+          height={4}
         />
       </box>
     );
