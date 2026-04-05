@@ -33,7 +33,7 @@ type Props = {
   onComplete: (config: Config) => void;
 };
 
-const GH_REPO_NAME = "git-agents";
+const GH_REPO_NAME = "git-agents-remote";
 
 export function SetupScreen({ existingConfig, onComplete }: Props) {
   const [step, setStep] = useState<SetupStep>("welcome");
