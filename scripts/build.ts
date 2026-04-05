@@ -1,8 +1,8 @@
 const result = await Bun.build({
   entrypoints: ["./src/index.tsx"],
   outdir: "./dist",
-  target: "bun",
-  minify: false,
+  target: "node",
+  minify: true,
 });
 
 if (!result.success) {
@@ -16,6 +16,6 @@ if (!result.success) {
 // Prepend shebang so the file is executable as a CLI
 const outfile = "./dist/index.js";
 const content = await Bun.file(outfile).text();
-await Bun.write(outfile, "#!/usr/bin/env bun\n" + content);
+await Bun.write(outfile, "#!/usr/bin/env node\n" + content);
 
 console.log("Built dist/index.js");
