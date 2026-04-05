@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useKeyboard } from "@opentui/react";
 import { TextAttributes } from "@opentui/core";
 import {
@@ -9,6 +9,7 @@ import {
   ghGetRepoCloneUrl,
   checkGitRepoExists,
   cloneRepo,
+  gitSetRemoteUrl,
 } from "../utils/shell";
 import { writeConfig, CONFIG_DIR } from "../utils/config";
 import {
@@ -32,7 +33,6 @@ type SetupStep =
   | "git-url-input"
   | "git-url-checking"
   | "cloning"
-  | "done"
   | "error";
 
 type Props = {
@@ -54,8 +54,6 @@ export function SetupScreen({ existingConfig, onComplete }: Props) {
   const [statusMsg, setStatusMsg] = useState("");
 
   useKeyboard((key) => {
-    if (key.ctrl && key.name === "c") process.exit(0);
-
     if (step === "welcome" && key.name === "return") {
       setStep("choose-remote");
     }
@@ -65,6 +63,10 @@ export function SetupScreen({ existingConfig, onComplete }: Props) {
     }
 
     if (step === "error" && key.name === "return") {
+      setStep("choose-remote");
+    }
+
+    if (step === "git-url-input" && key.name === "escape") {
       setStep("choose-remote");
     }
   });
@@ -87,9 +89,10 @@ export function SetupScreen({ existingConfig, onComplete }: Props) {
     ghCreateRepo,
     ghGetRepoCloneUrl,
     checkGitRepoExists,
-    cloneRepo: (url: string, dest: string) => cloneRepo(url, dest),
+    cloneRepo: (url: string) => cloneRepo(url, CONFIG_DIR),
     isAlreadyCloned: () => existsSync(join(CONFIG_DIR, ".git")),
     writeConfig,
+    gitSetRemoteUrl,
   };
 
   async function startGhFlow() {
@@ -143,13 +146,13 @@ export function SetupScreen({ existingConfig, onComplete }: Props) {
   async function startClone(url: string, remote: RemoteType) {
     setStep("cloning");
     setStatusMsg(`Cloning ${url}...`);
-    const result = await runClone(url, remote, { ...shellDeps, cloneRepo: (u) => cloneRepo(u, CONFIG_DIR) });
+    const result = await runClone(url, remote, CONFIG_DIR, shellDeps);
     if (result.type === "error") {
       setErrorMsg(result.message);
       setStep("error");
       return;
     }
-    setStep("done");
+    onComplete(result.config);
   }
 
   async function validateGitUrl(url: string) {
@@ -164,16 +167,6 @@ export function SetupScreen({ existingConfig, onComplete }: Props) {
     await startClone(url, "git");
   }
 
-  useEffect(() => {
-    if (step === "done") {
-      const config: Config = {
-        remote: selectedRemote,
-        repoUrl: selectedRemote === "git" ? repoCloneUrl || gitUrl : undefined,
-      };
-      onComplete(config);
-    }
-  }, [step]);
-
   // ---- Render ----
 
   if (step === "welcome") {
@@ -183,7 +176,7 @@ export function SetupScreen({ existingConfig, onComplete }: Props) {
         <box flexDirection="column" alignItems="center" gap={1} width={60}>
           <text>Sync your Claude agents skills with a remote git repo.</text>
           <text attributes={TextAttributes.DIM}>
-            Keeps ~/.agents in sync across machines using git.
+            Keeps your AI agents in sync across machines using git.
           </text>
         </box>
         <text>

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, afterEach } from "bun:test";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -10,11 +10,11 @@ function mkTmp(): string {
   return dir;
 }
 
-function mkAgent(base: string, name: string, files: string[] = []): void {
+function mkAgent(base: string, name: string, files: string[] = [], content?: string): void {
   const agentDir = join(base, name);
   mkdirSync(agentDir, { recursive: true });
   for (const f of files) {
-    writeFileSync(join(agentDir, f), "");
+    writeFileSync(join(agentDir, f), content ?? "");
   }
 }
 
@@ -43,18 +43,22 @@ describe("listAgents", () => {
     expect(listAgents(dir)).toEqual([]);
   });
 
-  it("returns sorted entries with correct fileCount", () => {
+  it("returns sorted entries with correct fileCount and contentHash", () => {
     const dir = useTmp();
     mkAgent(dir, "zebra", ["a.ts", "b.ts"]);
     mkAgent(dir, "alpha", ["x.ts"]);
     mkAgent(dir, "middle", []);
 
     const result = listAgents(dir);
-    expect(result).toEqual([
-      { name: "alpha", fileCount: 1 },
-      { name: "middle", fileCount: 0 },
-      { name: "zebra", fileCount: 2 },
-    ]);
+    expect(result).toHaveLength(3);
+    expect(result[0]!.name).toBe("alpha");
+    expect(result[0]!.fileCount).toBe(1);
+    expect(typeof result[0]!.contentHash).toBe("string");
+    expect(result[0]!.contentHash).toHaveLength(64);
+    expect(result[1]!.name).toBe("middle");
+    expect(result[1]!.fileCount).toBe(0);
+    expect(result[2]!.name).toBe("zebra");
+    expect(result[2]!.fileCount).toBe(2);
   });
 
   it("ignores files (non-directories)", () => {
@@ -101,11 +105,11 @@ describe("diffAgents", () => {
     expect(unchanged).toHaveLength(0);
   });
 
-  it("marks agents with same file count as unchanged", () => {
+  it("marks agents with identical files as unchanged", () => {
     const src = useTmp();
     const dst = useTmp();
     mkAgent(src, "agent", ["a.ts", "b.ts"]);
-    mkAgent(dst, "agent", ["c.ts", "d.ts"]);
+    mkAgent(dst, "agent", ["a.ts", "b.ts"]);
 
     const { unchanged, added, removed, modified } = diffAgents(src, dst);
     expect(unchanged).toHaveLength(1);
@@ -113,6 +117,20 @@ describe("diffAgents", () => {
     expect(added).toHaveLength(0);
     expect(removed).toHaveLength(0);
     expect(modified).toHaveLength(0);
+  });
+
+  it("marks agents with different files but same count as modified", () => {
+    const src = useTmp();
+    const dst = useTmp();
+    mkAgent(src, "agent", ["a.ts", "b.ts"]);
+    mkAgent(dst, "agent", ["c.ts", "d.ts"]);
+
+    const { modified, added, removed, unchanged } = diffAgents(src, dst);
+    expect(modified).toHaveLength(1);
+    expect(modified[0]!.name).toBe("agent");
+    expect(added).toHaveLength(0);
+    expect(removed).toHaveLength(0);
+    expect(unchanged).toHaveLength(0);
   });
 
   it("marks agents with different file count as modified", () => {
@@ -129,6 +147,17 @@ describe("diffAgents", () => {
     expect(unchanged).toHaveLength(0);
   });
 
+  it("marks agents with different file sizes as modified", () => {
+    const src = useTmp();
+    const dst = useTmp();
+    mkAgent(src, "agent", ["a.ts"], "short");
+    mkAgent(dst, "agent", ["a.ts"], "much longer content");
+
+    const { modified } = diffAgents(src, dst);
+    expect(modified).toHaveLength(1);
+    expect(modified[0]!.name).toBe("agent");
+  });
+
   it("handles mixed scenario across all categories", () => {
     const src = useTmp();
     const dst = useTmp();
@@ -137,7 +166,7 @@ describe("diffAgents", () => {
     mkAgent(src, "will-stay", ["a.ts"]);
     mkAgent(dst, "will-remove", ["y.ts"]);
     mkAgent(dst, "will-modify", ["a.ts"]);
-    mkAgent(dst, "will-stay", ["b.ts"]);
+    mkAgent(dst, "will-stay", ["a.ts"]);
 
     const diff = diffAgents(src, dst);
     expect(diff.added.map((e) => e.name)).toEqual(["will-add"]);

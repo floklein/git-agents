@@ -1,9 +1,7 @@
 import { getSyncDirForAgent } from "./config";
 import { diffAgents, copyAgentsDir, listAgents } from "./agents";
 import type { AgentDef } from "./agentDefs";
-import type { Config, AgentsDiff, RemoteType } from "../types";
-
-type ShellResult = { ok: boolean; output?: string; error?: string };
+import type { Config, AgentsDiff, RemoteType, ShellResult } from "../types";
 
 export type FlowDeps = {
   checkGhInstalled: () => Promise<ShellResult>;
@@ -12,11 +10,12 @@ export type FlowDeps = {
   ghCreateRepo: (name: string) => Promise<ShellResult>;
   ghGetRepoCloneUrl: (name: string) => Promise<ShellResult>;
   checkGitRepoExists: (url: string) => Promise<ShellResult>;
-  cloneRepo: (url: string, dest: string) => Promise<ShellResult>;
+  cloneRepo: (url: string) => Promise<ShellResult>;
   isAlreadyCloned: () => boolean;
   writeConfig: (config: Config) => void;
   gitPull: (dir: string) => Promise<ShellResult>;
   gitAddCommitPush: (dir: string, message: string) => Promise<ShellResult>;
+  gitSetRemoteUrl: (dir: string, url: string) => Promise<ShellResult>;
 };
 
 export type GhPrecheckResult =
@@ -82,16 +81,21 @@ export type CloneResult =
 export async function runClone(
   url: string,
   remote: RemoteType,
-  deps: Pick<FlowDeps, "cloneRepo" | "isAlreadyCloned" | "writeConfig">
+  configDir: string,
+  deps: Pick<FlowDeps, "cloneRepo" | "isAlreadyCloned" | "writeConfig" | "gitSetRemoteUrl">
 ): Promise<CloneResult> {
   const config: Config = { remote, repoUrl: remote === "git" ? url : undefined };
 
   if (deps.isAlreadyCloned()) {
+    const setUrlResult = await deps.gitSetRemoteUrl(configDir, url);
+    if (!setUrlResult.ok) {
+      return { type: "error", message: `Failed to update remote URL: ${setUrlResult.error ?? "unknown error"}` };
+    }
     deps.writeConfig(config);
     return { type: "ok", config };
   }
 
-  const result = await deps.cloneRepo(url, "");
+  const result = await deps.cloneRepo(url);
   if (!result.ok) {
     return { type: "error", message: `Failed to clone: ${result.error ?? "unknown error"}` };
   }
@@ -116,7 +120,7 @@ export async function runGitUrlValidation(
 }
 
 export type AgentDiffEntry = {
-  def: AgentDef;
+  defs: AgentDef[];
   diff: AgentsDiff;
   remoteCount: number;
   localCount: number;
@@ -152,14 +156,12 @@ export async function runSyncLoad(
     const srcList = listAgents(sourceDir);
     const dstList = listAgents(destDir);
     if (srcList.length === 0 && dstList.length === 0) continue;
-    for (const def of defs) {
-      entries.push({
-        def,
-        diff: d,
-        remoteCount: mode === "pull" ? srcList.length : dstList.length,
-        localCount: mode === "pull" ? dstList.length : srcList.length,
-      });
-    }
+    entries.push({
+      defs,
+      diff: d,
+      remoteCount: mode === "pull" ? srcList.length : dstList.length,
+      localCount: mode === "pull" ? dstList.length : srcList.length,
+    });
   }
 
   return { type: "ok", agentDiffs: entries };
@@ -178,11 +180,12 @@ export async function runSyncExecute(
   const copied = new Set<string>();
   try {
     for (const entry of agentDiffs) {
-      if (copied.has(entry.def.globalPath)) continue;
-      copied.add(entry.def.globalPath);
-      const syncDir = getSyncDirForAgent(entry.def.globalPath);
-      const sourceDir = mode === "pull" ? syncDir : entry.def.globalPath;
-      const destDir = mode === "pull" ? entry.def.globalPath : syncDir;
+      const globalPath = entry.defs[0]!.globalPath;
+      if (copied.has(globalPath)) continue;
+      copied.add(globalPath);
+      const syncDir = getSyncDirForAgent(globalPath);
+      const sourceDir = mode === "pull" ? syncDir : globalPath;
+      const destDir = mode === "pull" ? globalPath : syncDir;
       copyAgentsDir(sourceDir, destDir);
     }
   } catch (e: any) {

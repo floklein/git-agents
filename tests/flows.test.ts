@@ -135,28 +135,46 @@ describe("runGhCreateRepo", () => {
 // ---- runClone ----
 
 describe("runClone", () => {
-  it("skips cloneRepo and writes config when already cloned", async () => {
+  it("calls gitSetRemoteUrl and writes config when already cloned", async () => {
     let cloneCalled = false;
     let writtenConfig: any = null;
+    let setUrlDir = "";
+    let setUrlUrl = "";
 
-    const result = await runClone("git@github.com:user/repo.git", "gh", {
+    const result = await runClone("git@github.com:user/repo.git", "gh", "/my/config", {
       isAlreadyCloned: () => true,
       cloneRepo: async () => { cloneCalled = true; return { ok: true }; },
       writeConfig: (c) => { writtenConfig = c; },
+      gitSetRemoteUrl: async (dir, url) => { setUrlDir = dir; setUrlUrl = url; return { ok: true }; },
     });
 
     expect(result.type).toBe("ok");
     expect(cloneCalled).toBe(false);
     expect(writtenConfig).toEqual({ remote: "gh", repoUrl: undefined });
+    expect(setUrlDir).toBe("/my/config");
+    expect(setUrlUrl).toBe("git@github.com:user/repo.git");
+  });
+
+  it("returns error when gitSetRemoteUrl fails (already cloned)", async () => {
+    const result = await runClone("git@github.com:user/repo.git", "git", "/config", {
+      isAlreadyCloned: () => true,
+      cloneRepo: ok(),
+      writeConfig: () => {},
+      gitSetRemoteUrl: fail("remote not found"),
+    });
+
+    expect(result.type).toBe("error");
+    expect((result as any).message).toContain("Failed to update remote URL");
   });
 
   it("calls cloneRepo and writes config when not yet cloned (gh remote)", async () => {
     let writtenConfig: any = null;
 
-    const result = await runClone("git@github.com:user/repo.git", "gh", {
+    const result = await runClone("git@github.com:user/repo.git", "gh", "/config", {
       isAlreadyCloned: () => false,
       cloneRepo: ok(),
       writeConfig: (c) => { writtenConfig = c; },
+      gitSetRemoteUrl: ok(),
     });
 
     expect(result.type).toBe("ok");
@@ -166,20 +184,22 @@ describe("runClone", () => {
   it("stores repoUrl in config for git remote type", async () => {
     let writtenConfig: any = null;
 
-    await runClone("git@github.com:user/repo.git", "git", {
+    await runClone("git@github.com:user/repo.git", "git", "/config", {
       isAlreadyCloned: () => false,
       cloneRepo: ok(),
       writeConfig: (c) => { writtenConfig = c; },
+      gitSetRemoteUrl: ok(),
     });
 
     expect(writtenConfig).toEqual({ remote: "git", repoUrl: "git@github.com:user/repo.git" });
   });
 
   it("returns error when cloneRepo fails", async () => {
-    const result = await runClone("git@github.com:user/repo.git", "git", {
+    const result = await runClone("git@github.com:user/repo.git", "git", "/config", {
       isAlreadyCloned: () => false,
       cloneRepo: fail("permission denied"),
       writeConfig: () => {},
+      gitSetRemoteUrl: ok(),
     });
 
     expect(result.type).toBe("error");
@@ -226,7 +246,6 @@ describe("runSyncLoad", () => {
   });
 
   it("skips agent entries where both local and remote dirs are empty", async () => {
-    // globalPath exists but is empty, syncDir (computed from homedir) won't exist either
     const base = useTmp();
     const agentDef: AgentDef = { id: "test-agent", name: "Test Agent", globalPath: base };
 
@@ -235,7 +254,6 @@ describe("runSyncLoad", () => {
     });
 
     expect(result.type).toBe("ok");
-    // Both srcList and dstList are empty so entry is skipped
     expect((result as any).agentDiffs).toEqual([]);
   });
 
@@ -252,10 +270,27 @@ describe("runSyncLoad", () => {
     expect(result.type).toBe("ok");
     const diffs = (result as any).agentDiffs as AgentDiffEntry[];
     expect(diffs).toHaveLength(1);
-    expect(diffs[0]!.def.id).toBe("test-agent");
-    // syncDir doesn't exist so remoteCount=0, local has 1 skill
+    expect(diffs[0]!.defs[0]!.id).toBe("test-agent");
     expect(diffs[0]!.remoteCount).toBe(0);
     expect(diffs[0]!.localCount).toBe(1);
+  });
+
+  it("groups agents sharing the same globalPath into one entry", async () => {
+    const base = useTmp();
+    mkdirSync(join(base, "my-skill"), { recursive: true });
+
+    const def1: AgentDef = { id: "agent-a", name: "Agent A", globalPath: base };
+    const def2: AgentDef = { id: "agent-b", name: "Agent B", globalPath: base };
+
+    const result = await runSyncLoad("pull", [def1, def2], "/config/dir", {
+      gitPull: ok(),
+    });
+
+    expect(result.type).toBe("ok");
+    const diffs = (result as any).agentDiffs as AgentDiffEntry[];
+    expect(diffs).toHaveLength(1);
+    expect(diffs[0]!.defs).toHaveLength(2);
+    expect(diffs[0]!.defs.map((d: AgentDef) => d.id)).toEqual(["agent-a", "agent-b"]);
   });
 });
 
@@ -275,18 +310,6 @@ describe("runSyncExecute (pull)", () => {
   });
 
   it("copies agents from syncDir to globalPath for pull", async () => {
-    const globalPath = useTmp();
-    const syncDir = useTmp();
-
-    // Put a skill in the syncDir (remote)
-    mkdirSync(join(syncDir, "my-skill"), { recursive: true });
-    writeFileSync(join(syncDir, "my-skill", "commands.ts"), "export {}");
-
-    // We need the AgentDiffEntry to have globalPath pointing to our temp dir.
-    // runSyncExecute uses getSyncDirForAgent(entry.def.globalPath) to find syncDir,
-    // which is computed relative to homedir — we can't easily override that without
-    // mocking. Instead, test copyAgentsDir directly in agents.test.ts.
-    // Here we verify the function returns ok when there's nothing to copy.
     const result = await runSyncExecute("pull", [], "/config/dir", {
       gitAddCommitPush: ok(),
     });
@@ -333,9 +356,8 @@ describe("runSyncExecute (push)", () => {
   });
 
   it("returns error when copying agents throws", async () => {
-    // Create an entry whose globalPath doesn't exist so copyAgentsDir will throw
     const fakeEntry: AgentDiffEntry = {
-      def: { id: "x", name: "X", globalPath: "/nonexistent/path/that/does/not/exist" },
+      defs: [{ id: "x", name: "X", globalPath: "/nonexistent/path/that/does/not/exist" }],
       diff: { added: [], removed: [], modified: [], unchanged: [] },
       remoteCount: 0,
       localCount: 0,
@@ -345,7 +367,6 @@ describe("runSyncExecute (push)", () => {
       gitAddCommitPush: ok(),
     });
 
-    // copyAgentsDir will throw because source dir doesn't exist
     expect(result.type).toBe("error");
     expect((result as any).message).toContain("Failed to copy agents");
   });

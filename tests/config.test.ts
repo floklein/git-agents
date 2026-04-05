@@ -1,70 +1,86 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, afterEach } from "bun:test";
 import { existsSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "fs";
 import { join } from "path";
-import { homedir } from "os";
-import { tmpdir } from "os";
-import { readConfig, writeConfig, getSyncDirForAgent, CONFIG_DIR, CONFIG_FILE } from "../src/utils/config";
+import { homedir, tmpdir } from "os";
+import { readConfig, writeConfig, getSyncDirForAgent, CONFIG_DIR } from "../src/utils/config";
 
-// Save and restore the real config file around each test
-let savedConfig: string | null = null;
+let tmpDirs: string[] = [];
 
-beforeEach(() => {
-  savedConfig = existsSync(CONFIG_FILE) ? readFileSync(CONFIG_FILE, "utf8") : null;
-  if (existsSync(CONFIG_FILE)) rmSync(CONFIG_FILE);
-});
+function useTmpConfig() {
+  const dir = join(tmpdir(), `ga-config-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, "config.json");
+  tmpDirs.push(dir);
+  return { dir, file };
+}
 
 afterEach(() => {
-  if (existsSync(CONFIG_FILE)) rmSync(CONFIG_FILE);
-  if (savedConfig !== null) {
-    mkdirSync(CONFIG_DIR, { recursive: true });
-    writeFileSync(CONFIG_FILE, savedConfig, "utf8");
+  for (const dir of tmpDirs) {
+    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
   }
-  savedConfig = null;
+  tmpDirs = [];
 });
 
 describe("readConfig", () => {
   it("returns null when config file does not exist", () => {
-    expect(readConfig()).toBeNull();
+    const { file } = useTmpConfig();
+    expect(readConfig(file)).toBeNull();
   });
 
   it("returns parsed config when file is valid JSON", () => {
-    mkdirSync(CONFIG_DIR, { recursive: true });
-    writeFileSync(CONFIG_FILE, JSON.stringify({ remote: "gh" }), "utf8");
+    const { dir, file } = useTmpConfig();
+    writeFileSync(file, JSON.stringify({ remote: "gh" }), "utf8");
 
-    const config = readConfig();
+    const config = readConfig(file);
     expect(config).toEqual({ remote: "gh" });
   });
 
   it("returns config with repoUrl for git remote type", () => {
-    mkdirSync(CONFIG_DIR, { recursive: true });
-    writeFileSync(CONFIG_FILE, JSON.stringify({ remote: "git", repoUrl: "git@github.com:user/repo.git" }), "utf8");
+    const { file } = useTmpConfig();
+    writeFileSync(file, JSON.stringify({ remote: "git", repoUrl: "git@github.com:user/repo.git" }), "utf8");
 
-    const config = readConfig();
+    const config = readConfig(file);
     expect(config).toEqual({ remote: "git", repoUrl: "git@github.com:user/repo.git" });
   });
 
   it("returns null on malformed JSON", () => {
-    mkdirSync(CONFIG_DIR, { recursive: true });
-    writeFileSync(CONFIG_FILE, "not valid json {{{", "utf8");
+    const { file } = useTmpConfig();
+    writeFileSync(file, "not valid json {{{", "utf8");
 
-    expect(readConfig()).toBeNull();
+    expect(readConfig(file)).toBeNull();
+  });
+
+  it("returns null for invalid remote value", () => {
+    const { file } = useTmpConfig();
+    writeFileSync(file, JSON.stringify({ remote: "ftp" }), "utf8");
+
+    expect(readConfig(file)).toBeNull();
+  });
+
+  it("returns null when remote field is missing", () => {
+    const { file } = useTmpConfig();
+    writeFileSync(file, JSON.stringify({ repoUrl: "git@github.com:user/repo.git" }), "utf8");
+
+    expect(readConfig(file)).toBeNull();
   });
 });
 
 describe("writeConfig", () => {
   it("writes config as formatted JSON", () => {
-    writeConfig({ remote: "gh" });
+    const { dir, file } = useTmpConfig();
+    writeConfig({ remote: "gh" }, dir, file);
 
-    expect(existsSync(CONFIG_FILE)).toBe(true);
-    const written = JSON.parse(readFileSync(CONFIG_FILE, "utf8"));
+    expect(existsSync(file)).toBe(true);
+    const written = JSON.parse(readFileSync(file, "utf8"));
     expect(written).toEqual({ remote: "gh" });
   });
 
   it("round-trips: written config can be read back", () => {
+    const { dir, file } = useTmpConfig();
     const config = { remote: "git" as const, repoUrl: "git@github.com:user/repo.git" };
-    writeConfig(config);
+    writeConfig(config, dir, file);
 
-    expect(readConfig()).toEqual(config);
+    expect(readConfig(file)).toEqual(config);
   });
 });
 
