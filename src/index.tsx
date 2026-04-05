@@ -1,16 +1,24 @@
-import { createCliRenderer, TextAttributes } from "@opentui/core";
+import { createCliRenderer } from "@opentui/core";
 import { createRoot } from "@opentui/react";
+import { readConfig } from "./utils/config";
+import { App } from "./App";
+import type { Screen } from "./types";
 
-function App() {
-  return (
-    <box alignItems="center" justifyContent="center" flexGrow={1}>
-      <box justifyContent="center" alignItems="flex-end">
-        <ascii-font font="tiny" text="OpenTUI" />
-        <text attributes={TextAttributes.DIM}>What will you build?</text>
-      </box>
-    </box>
-  );
-}
+const args = process.argv.slice(2);
+const directCommand = args[0];
 
-const renderer = await createCliRenderer();
-createRoot(renderer).render(<App />);
+const config = readConfig();
+
+const initialScreen: Screen =
+  !config
+    ? { id: "setup" }
+    : directCommand === "pull"
+    ? { id: "sync", mode: "pull" }
+    : directCommand === "push"
+    ? { id: "sync", mode: "push" }
+    : { id: "main" };
+
+const renderer = await createCliRenderer({ exitOnCtrlC: false });
+createRoot(renderer).render(
+  <App initialScreen={initialScreen} initialConfig={config ?? undefined} />
+);
