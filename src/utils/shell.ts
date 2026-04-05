@@ -71,7 +71,12 @@ export async function gitPull(dir: string): Promise<ShellResult> {
     const result = await $`git -C ${dir} pull`.quiet();
     return { ok: result.exitCode === 0, output: result.stdout.toString() };
   } catch (e: any) {
-    return { ok: false, error: e.stderr?.toString() ?? e.message };
+    const stderr = e.stderr?.toString() ?? e.message ?? "";
+    // Remote is empty (freshly created repo) — treat as no-op
+    if (stderr.includes("no such ref was fetched") || stderr.includes("couldn't find remote ref")) {
+      return { ok: true, output: "Remote is empty" };
+    }
+    return { ok: false, error: stderr };
   }
 }
 
@@ -83,7 +88,7 @@ export async function gitAddCommitPush(dir: string, message: string): Promise<Sh
       return { ok: true, output: "Nothing to commit" };
     }
     await $`git -C ${dir} commit -m ${message}`.quiet();
-    const push = await $`git -C ${dir} push`.quiet();
+    const push = await $`git -C ${dir} push -u origin HEAD`.quiet();
     return { ok: push.exitCode === 0 };
   } catch (e: any) {
     return { ok: false, error: e.stderr?.toString() ?? e.message };
