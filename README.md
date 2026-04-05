@@ -9,14 +9,21 @@ A terminal UI tool to sync your AI agents and skills across machines using git.
 ## Install
 
 ```bash
+bun install --global git-agents
+```
+
+Or with npm:
+
+```bash
 npm install --global git-agents
 ```
+
+> **Requires [Bun](https://bun.sh)** — install it first if you haven't already.
 
 ### From source
 
 ```bash
 bun install
-bun run build
 bun link   # makes `ga` and `git-agents` available globally
 ```
 
@@ -61,6 +68,6 @@ Select **Edit Config** from the main menu to reconfigure your remote at any time
 
 ## Requirements
 
-- [Node.js](https://nodejs.org) (v18+)
+- [Bun](https://bun.sh)
 - [git](https://git-scm.com)
 - [GitHub CLI](https://cli.github.com) *(only if using the GH CLI remote option)*
