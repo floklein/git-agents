@@ -1,11 +1,17 @@
-export type RemoteType = "gh" | "git";
+import { z } from "zod";
 
-export type Config = {
-  remote: RemoteType;
-  repoUrl?: string; // Only for "git" mode
-};
+export type ShellResult = { ok: boolean; output?: string; error?: string };
 
-export type AgentEntry = { name: string; fileCount: number };
+export const ConfigSchema = z.object({
+  remote: z.enum(["gh", "git"]),
+  repoUrl: z.string().optional(),
+});
+
+export type Config = z.infer<typeof ConfigSchema>;
+
+export type RemoteType = Config["remote"];
+
+export type AgentEntry = { name: string; fileCount: number; contentHash: string };
 
 export type AgentsDiff = {
   added: AgentEntry[];

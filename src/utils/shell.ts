@@ -1,6 +1,5 @@
 import { $ } from "bun";
-
-type ShellResult = { ok: boolean; output?: string; error?: string };
+import type { ShellResult } from "../types";
 
 export async function checkGhInstalled(): Promise<ShellResult> {
   try {
@@ -101,5 +100,14 @@ export async function initRepo(dir: string): Promise<ShellResult> {
     return { ok: true };
   } catch (e: any) {
     return { ok: false, error: e.message };
+  }
+}
+
+export async function gitSetRemoteUrl(dir: string, url: string): Promise<ShellResult> {
+  try {
+    const result = await $`git -C ${dir} remote set-url origin ${url}`.quiet();
+    return { ok: result.exitCode === 0 };
+  } catch (e: any) {
+    return { ok: false, error: e.stderr?.toString() ?? e.message };
   }
 }

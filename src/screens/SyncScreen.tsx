@@ -87,18 +87,8 @@ export function SyncScreen({ mode, onBack }: Props) {
   }
 
   // review stage
-  const seenPaths = new Set<string>();
-  const totalRemote = agentDiffs.reduce((acc, e) => {
-    if (seenPaths.has(e.def.globalPath)) return acc;
-    seenPaths.add(e.def.globalPath);
-    return acc + e.remoteCount;
-  }, 0);
-  seenPaths.clear();
-  const totalLocal = agentDiffs.reduce((acc, e) => {
-    if (seenPaths.has(e.def.globalPath)) return acc;
-    seenPaths.add(e.def.globalPath);
-    return acc + e.localCount;
-  }, 0);
+  const totalRemote = agentDiffs.reduce((acc, e) => acc + e.remoteCount, 0);
+  const totalLocal = agentDiffs.reduce((acc, e) => acc + e.localCount, 0);
 
   const hasChanges = agentDiffs.some(
     (e) => e.diff.added.length > 0 || e.diff.removed.length > 0 || e.diff.modified.length > 0
@@ -137,9 +127,9 @@ export function SyncScreen({ mode, onBack }: Props) {
           const d = entry.diff;
           const agentHasChanges = d.added.length > 0 || d.removed.length > 0 || d.modified.length > 0;
           return (
-            <box key={entry.def.id} flexDirection="column">
+            <box key={entry.defs.map((d) => d.id).join(",")} flexDirection="column">
               <box flexDirection="row" justifyContent="space-between">
-                <text fg="#bd93f9">{entry.def.name}</text>
+                <text fg="#bd93f9">{entry.defs.map((d) => d.name).join(", ")}</text>
                 <text attributes={TextAttributes.DIM}>
                   {entry.remoteCount}↓ / {entry.localCount}↑
                 </text>

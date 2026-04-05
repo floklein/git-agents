@@ -7,7 +7,7 @@ type Props = {
 
 export function MainMenuScreen({ onNavigate }: Props) {
   useKeyboard((key) => {
-    if (key.name === "escape" || (key.ctrl && key.name === "c")) {
+    if (key.name === "escape") {
       process.exit(0);
     }
   });
