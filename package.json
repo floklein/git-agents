@@ -34,7 +34,8 @@
     "dev": "bun run --watch src/index.tsx",
     "start": "bun src/index.tsx",
     "build": "bun scripts/build.ts",
-    "prepublishOnly": "bun run build"
+    "prepublishOnly": "bun run build",
+    "test": "bun test"
   },
   "dependencies": {
     "@opentui/core": "^0.1.95",
