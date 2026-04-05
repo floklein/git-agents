@@ -1,20 +1,12 @@
 import { useState, useEffect } from "react";
 import { useKeyboard } from "@opentui/react";
 import { TextAttributes } from "@opentui/core";
-import { getSyncDirForAgent, CONFIG_DIR } from "../utils/config";
+import { CONFIG_DIR } from "../utils/config";
 import { gitPull, gitAddCommitPush } from "../utils/shell";
-import { diffAgents, copyAgentsDir, listAgents } from "../utils/agents";
-import { AGENT_DEFS, type AgentDef } from "../utils/agentDefs";
-import type { AgentsDiff } from "../types";
+import { AGENT_DEFS } from "../utils/agentDefs";
+import { runSyncLoad, runSyncExecute, type AgentDiffEntry } from "../utils/flows";
 
 type Stage = "loading" | "review" | "executing" | "done";
-
-type AgentDiffEntry = {
-  def: AgentDef;
-  diff: AgentsDiff;
-  remoteCount: number;
-  localCount: number;
-};
 
 type Props = {
   mode: "pull" | "push";
@@ -34,44 +26,19 @@ export function SyncScreen({ mode, onBack }: Props) {
     }
   });
 
+  const shellDeps = { gitPull, gitAddCommitPush };
+
   useEffect(() => {
     async function load() {
       setStatus("Pulling remote changes...");
-      const pullResult = await gitPull(CONFIG_DIR);
-      if (!pullResult.ok) {
-        setError(`Failed to pull remote: ${pullResult.error ?? "unknown error"}`);
+      const result = await runSyncLoad(mode, AGENT_DEFS, CONFIG_DIR, shellDeps);
+      if (result.type === "error") {
+        setError(result.message);
         setStage("done");
         return;
       }
-
       setStatus("Comparing agents...");
-
-      const seen = new Map<string, AgentDef[]>();
-      for (const def of AGENT_DEFS) {
-        const existing = seen.get(def.globalPath) ?? [];
-        seen.set(def.globalPath, [...existing, def]);
-      }
-
-      const entries: AgentDiffEntry[] = [];
-      for (const [globalPath, defs] of seen) {
-        const syncDir = getSyncDirForAgent(globalPath);
-        const sourceDir = mode === "pull" ? syncDir : globalPath;
-        const destDir = mode === "pull" ? globalPath : syncDir;
-        const d = diffAgents(sourceDir, destDir);
-        const srcList = listAgents(sourceDir);
-        const dstList = listAgents(destDir);
-        if (srcList.length === 0 && dstList.length === 0) continue;
-        for (const def of defs) {
-          entries.push({
-            def,
-            diff: d,
-            remoteCount: mode === "pull" ? srcList.length : dstList.length,
-            localCount: mode === "pull" ? dstList.length : srcList.length,
-          });
-        }
-      }
-
-      setAgentDiffs(entries);
+      setAgentDiffs(result.agentDiffs);
       setStage("review");
     }
     load();
@@ -86,37 +53,13 @@ export function SyncScreen({ mode, onBack }: Props) {
     setStage("executing");
     setStatus(mode === "pull" ? "Copying agents from remote..." : "Copying agents to remote...");
 
-    const copied = new Set<string>();
-    try {
-      for (const entry of agentDiffs) {
-        if (copied.has(entry.def.globalPath)) continue;
-        copied.add(entry.def.globalPath);
-        const syncDir = getSyncDirForAgent(entry.def.globalPath);
-        const sourceDir = mode === "pull" ? syncDir : entry.def.globalPath;
-        const destDir = mode === "pull" ? entry.def.globalPath : syncDir;
-        copyAgentsDir(sourceDir, destDir);
-      }
-    } catch (e: any) {
-      setError(`Failed to copy agents: ${e.message}`);
-      setStage("done");
-      return;
+    const result = await runSyncExecute(mode, agentDiffs, CONFIG_DIR, shellDeps);
+    if (result.type === "error") {
+      setError(result.message);
+    } else {
+      setDoneMessage(result.message);
+      setError(null);
     }
-
-    if (mode === "push") {
-      setStatus("Committing and pushing to remote...");
-      const pushResult = await gitAddCommitPush(
-        CONFIG_DIR,
-        `sync: update agents from local (${new Date().toISOString().slice(0, 10)})`
-      );
-      if (!pushResult.ok) {
-        setError(`Failed to push: ${pushResult.error ?? "unknown error"}`);
-        setStage("done");
-        return;
-      }
-    }
-
-    setDoneMessage(mode === "pull" ? "Pull complete! Local agents updated." : "Push complete! Remote updated.");
-    setError(null);
     setStage("done");
   }
 

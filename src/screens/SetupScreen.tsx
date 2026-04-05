@@ -11,6 +11,13 @@ import {
   cloneRepo,
 } from "../utils/shell";
 import { writeConfig, CONFIG_DIR } from "../utils/config";
+import {
+  runGhPrecheck,
+  runGhRepoCheck,
+  runGhCreateRepo,
+  runClone,
+  runGitUrlValidation,
+} from "../utils/flows";
 import { existsSync } from "fs";
 import { join } from "path";
 import type { Config, RemoteType } from "../types";
@@ -73,104 +80,87 @@ export function SetupScreen({ existingConfig, onComplete }: Props) {
     proceedGhRepoCheck();
   }
 
+  const shellDeps = {
+    checkGhInstalled,
+    checkGhAuth,
+    ghRepoExists,
+    ghCreateRepo,
+    ghGetRepoCloneUrl,
+    checkGitRepoExists,
+    cloneRepo: (url: string, dest: string) => cloneRepo(url, dest),
+    isAlreadyCloned: () => existsSync(join(CONFIG_DIR, ".git")),
+    writeConfig,
+  };
+
   async function startGhFlow() {
     setStep("gh-checking");
     setStatusMsg("Checking gh CLI...");
-
-    const ghInstalled = await checkGhInstalled();
-    if (!ghInstalled.ok) {
+    const result = await runGhPrecheck(shellDeps);
+    if (result.type === "gh-not-installed") {
       setErrorMsg("GitHub CLI (gh) is not installed. Install it from https://cli.github.com and try again.");
       setStep("error");
       return;
     }
-
-    const auth = await checkGhAuth();
-    if (!auth.ok) {
+    if (result.type === "needs-auth") {
       setStep("gh-auth-needed");
       return;
     }
-
     proceedGhRepoCheck();
   }
 
   async function proceedGhRepoCheck() {
     setStep("gh-checking");
     setStatusMsg("Checking for git-agents repo...");
-
-    const exists = await ghRepoExists(GH_REPO_NAME);
-    setGhRepoExistedBefore(exists.ok);
-
-    if (!exists.ok) {
-      setStep("gh-repo-check");
-      return;
-    }
-
-    const urlResult = await ghGetRepoCloneUrl(GH_REPO_NAME);
-    if (!urlResult.ok || !urlResult.output) {
-      setErrorMsg("Could not get repo URL from gh CLI.");
+    const result = await runGhRepoCheck(GH_REPO_NAME, shellDeps);
+    if (result.type === "error") {
+      setErrorMsg(result.message);
       setStep("error");
       return;
     }
-    setRepoCloneUrl(urlResult.output.trim());
+    if (result.type === "not-found") {
+      setGhRepoExistedBefore(false);
+      setStep("gh-repo-check");
+      return;
+    }
+    setGhRepoExistedBefore(true);
+    setRepoCloneUrl(result.url);
     setStep("gh-confirm");
   }
 
   async function createGhRepoAndContinue() {
     setStep("gh-checking");
     setStatusMsg(`Creating private repo "${GH_REPO_NAME}"...`);
-
-    const created = await ghCreateRepo(GH_REPO_NAME);
-    if (!created.ok) {
-      setErrorMsg(`Failed to create repo: ${created.error ?? "unknown error"}`);
+    const result = await runGhCreateRepo(GH_REPO_NAME, shellDeps);
+    if (result.type === "error") {
+      setErrorMsg(result.message);
       setStep("error");
       return;
     }
-
-    const urlResult = await ghGetRepoCloneUrl(GH_REPO_NAME);
-    if (!urlResult.ok || !urlResult.output) {
-      setErrorMsg("Could not get repo URL after creating it.");
-      setStep("error");
-      return;
-    }
-    setRepoCloneUrl(urlResult.output.trim());
+    setRepoCloneUrl(result.url);
     setStep("gh-confirm");
   }
 
   async function startClone(url: string, remote: RemoteType) {
     setStep("cloning");
     setStatusMsg(`Cloning ${url}...`);
-
-    const config: Config = { remote, repoUrl: remote === "git" ? url : undefined };
-
-    // If already cloned, skip clone
-    if (existsSync(join(CONFIG_DIR, ".git"))) {
-      writeConfig(config);
-      setStep("done");
-      return;
-    }
-
-    const result = await cloneRepo(url, CONFIG_DIR);
-    if (!result.ok) {
-      setErrorMsg(`Failed to clone: ${result.error ?? "unknown error"}`);
+    const result = await runClone(url, remote, { ...shellDeps, cloneRepo: (u) => cloneRepo(u, CONFIG_DIR) });
+    if (result.type === "error") {
+      setErrorMsg(result.message);
       setStep("error");
       return;
     }
-
-    writeConfig(config);
     setStep("done");
   }
 
   async function validateGitUrl(url: string) {
     setStep("git-url-checking");
     setStatusMsg("Validating repository...");
-
-    const exists = await checkGitRepoExists(url);
-    if (!exists.ok) {
-      setErrorMsg(`Cannot reach repository: ${url}\nMake sure the URL is correct and you have access.`);
+    const result = await runGitUrlValidation(url, shellDeps);
+    if (result.type === "error") {
+      setErrorMsg(`${result.message}\nMake sure the URL is correct and you have access.`);
       setStep("error");
       return;
     }
-
     await startClone(url, "git");
   }
 
