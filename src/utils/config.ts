@@ -1,4 +1,4 @@
-import { join } from "path";
+import { join, relative } from "path";
 import { homedir } from "os";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import type { Config } from "../types";
@@ -21,4 +21,9 @@ export function readConfig(): Config | null {
 export function writeConfig(config: Config): void {
   mkdirSync(CONFIG_DIR, { recursive: true });
   writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), "utf8");
+}
+
+export function getSyncDirForAgent(globalPath: string): string {
+  const rel = relative(homedir(), globalPath);
+  return join(CONFIG_DIR, rel);
 }
