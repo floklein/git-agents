@@ -32,6 +32,7 @@ export function MainMenuScreen({ onNavigate }: Props) {
             else if (index === 1) onNavigate({ id: "sync", mode: "push" });
             else if (index === 2) onNavigate({ id: "setup" });
           }}
+          height={6}
         />
       </box>
 

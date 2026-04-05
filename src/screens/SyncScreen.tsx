@@ -190,6 +190,7 @@ export function SyncScreen({ mode, onBack }: Props) {
           ]}
           onSelect={(index) => executeSync(index === 1)}
           width={30}
+          height={4}
         />
       </box>
 
