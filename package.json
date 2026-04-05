@@ -36,11 +36,13 @@
     "build": "bun scripts/build.ts",
     "prepublishOnly": "bun run build"
   },
-  "devDependencies": {
+  "dependencies": {
     "@opentui/core": "^0.1.95",
     "@opentui/react": "^0.1.95",
+    "react": "^19.2.4"
+  },
+  "devDependencies": {
     "@types/bun": "latest",
-    "react": "^19.2.4",
     "typescript": "^5"
   }
 }

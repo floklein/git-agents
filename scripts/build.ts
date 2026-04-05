@@ -3,6 +3,7 @@ const result = await Bun.build({
   outdir: "./dist",
   target: "bun",
   minify: true,
+  external: ["@opentui/core", "@opentui/react", "react"],
 });
 
 if (!result.success) {
