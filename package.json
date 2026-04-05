@@ -20,7 +20,7 @@
     "url": "git+https://github.com/floklein/git-agents.git"
   },
   "engines": {
-    "node": ">=18"
+    "bun": ">=1.0.0"
   },
   "bin": {
     "ga": "dist/index.js",
