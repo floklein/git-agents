@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { isAbsolute } from "path";
-import { AGENT_DEFS } from "../src/utils/agentDefs";
+import { AGENT_DEFS, BASE_SYNC_FOLDERS, getSyncFolders } from "../src/utils/agentDefs";
 
 describe("AGENT_DEFS", () => {
   it("has at least one entry", () => {
@@ -25,5 +25,40 @@ describe("AGENT_DEFS", () => {
     for (const def of AGENT_DEFS) {
       expect(isAbsolute(def.globalPath)).toBe(true);
     }
+  });
+
+  it("all custom syncFolders are non-empty arrays", () => {
+    for (const def of AGENT_DEFS) {
+      if (def.syncFolders) {
+        expect(def.syncFolders.length).toBeGreaterThan(0);
+        for (const f of def.syncFolders) {
+          expect(f.trim()).not.toBe("");
+        }
+      }
+    }
+  });
+});
+
+describe("BASE_SYNC_FOLDERS", () => {
+  it("is a non-empty array", () => {
+    expect(BASE_SYNC_FOLDERS.length).toBeGreaterThan(0);
+  });
+
+  it("contains common folder names", () => {
+    expect(BASE_SYNC_FOLDERS).toContain("skills");
+    expect(BASE_SYNC_FOLDERS).toContain("rules");
+    expect(BASE_SYNC_FOLDERS).toContain("commands");
+  });
+});
+
+describe("getSyncFolders", () => {
+  it("returns custom syncFolders when defined", () => {
+    const def = { id: "test", name: "Test", globalPath: "/test", syncFolders: ["skills"] };
+    expect(getSyncFolders(def)).toEqual(["skills"]);
+  });
+
+  it("returns BASE_SYNC_FOLDERS when syncFolders is undefined", () => {
+    const def = { id: "test", name: "Test", globalPath: "/test" };
+    expect(getSyncFolders(def)).toEqual(BASE_SYNC_FOLDERS);
   });
 });

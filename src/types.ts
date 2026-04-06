@@ -20,6 +20,11 @@ export type AgentsDiff = {
   unchanged: AgentEntry[];
 };
 
+export type FolderDiff = {
+  folder: string;
+  diff: AgentsDiff;
+};
+
 export type Screen =
   | { id: "setup"; existingConfig?: Config }
   | { id: "main" }

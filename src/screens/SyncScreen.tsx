@@ -90,8 +90,10 @@ export function SyncScreen({ mode, onBack }: Props) {
   const totalRemote = agentDiffs.reduce((acc, e) => acc + e.remoteCount, 0);
   const totalLocal = agentDiffs.reduce((acc, e) => acc + e.localCount, 0);
 
-  const hasChanges = agentDiffs.some(
-    (e) => e.diff.added.length > 0 || e.diff.removed.length > 0 || e.diff.modified.length > 0
+  const hasChanges = agentDiffs.some((e) =>
+    e.folderDiffs.some(
+      (fd) => fd.diff.added.length > 0 || fd.diff.removed.length > 0 || fd.diff.modified.length > 0
+    )
   );
 
   return (
@@ -123,43 +125,50 @@ export function SyncScreen({ mode, onBack }: Props) {
           <text attributes={TextAttributes.DIM}>No agents found</text>
         )}
 
-        {agentDiffs.map((entry) => {
-          const d = entry.diff;
-          const agentHasChanges = d.added.length > 0 || d.removed.length > 0 || d.modified.length > 0;
-          return (
-            <box key={entry.defs.map((d) => d.id).join(",")} flexDirection="column">
-              <box flexDirection="row" justifyContent="space-between">
-                <text fg="#bd93f9">{entry.defs.map((d) => d.name).join(", ")}</text>
-                <text attributes={TextAttributes.DIM}>
-                  {entry.remoteCount}↓ / {entry.localCount}↑
-                </text>
-              </box>
-              {d.added.map((e) => (
-                <text key={e.name}>
-                  <span fg="#50fa7b">  + </span>
-                  <span>{e.name}</span>
-                </text>
-              ))}
-              {d.removed.map((e) => (
-                <text key={e.name}>
-                  <span fg="#ff5555">  - </span>
-                  <span>{e.name}</span>
-                </text>
-              ))}
-              {d.modified.map((e) => (
-                <text key={e.name}>
-                  <span fg="#ffb86c">  ~ </span>
-                  <span>{e.name}</span>
-                </text>
-              ))}
-              {!agentHasChanges && d.unchanged.length > 0 && (
-                <text attributes={TextAttributes.DIM}>
-                  {"  "}{d.unchanged.length} skill{d.unchanged.length !== 1 ? "s" : ""} unchanged
-                </text>
-              )}
+        {agentDiffs.map((entry) => (
+          <box key={entry.defs.map((d) => d.id).join(",")} flexDirection="column">
+            <box flexDirection="row" justifyContent="space-between">
+              <text fg="#bd93f9">{entry.defs.map((d) => d.name).join(", ")}</text>
+              <text attributes={TextAttributes.DIM}>
+                {entry.remoteCount}↓ / {entry.localCount}↑
+              </text>
             </box>
-          );
-        })}
+            {entry.folderDiffs.map((fd) => {
+              const d = fd.diff;
+              const folderHasChanges = d.added.length > 0 || d.removed.length > 0 || d.modified.length > 0;
+              return (
+                <box key={fd.folder} flexDirection="column">
+                  <text>
+                    <span attributes={TextAttributes.DIM}>  {fd.folder}/</span>
+                  </text>
+                  {d.added.map((e) => (
+                    <text key={e.name}>
+                      <span fg="#50fa7b">    + </span>
+                      <span>{e.name}</span>
+                    </text>
+                  ))}
+                  {d.removed.map((e) => (
+                    <text key={e.name}>
+                      <span fg="#ff5555">    - </span>
+                      <span>{e.name}</span>
+                    </text>
+                  ))}
+                  {d.modified.map((e) => (
+                    <text key={e.name}>
+                      <span fg="#ffb86c">    ~ </span>
+                      <span>{e.name}</span>
+                    </text>
+                  ))}
+                  {!folderHasChanges && d.unchanged.length > 0 && (
+                    <text attributes={TextAttributes.DIM}>
+                      {"    "}{d.unchanged.length} unchanged
+                    </text>
+                  )}
+                </box>
+              );
+            })}
+          </box>
+        ))}
       </box>
 
       <box flexDirection="column" alignItems="center" gap={1}>
