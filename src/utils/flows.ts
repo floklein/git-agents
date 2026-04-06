@@ -1,7 +1,24 @@
+import { join } from "path";
+import { existsSync, readdirSync } from "fs";
 import { getSyncDirForAgent } from "./config";
-import { diffAgents, copyAgentsDir, listAgents } from "./agents";
-import type { AgentDef } from "./agentDefs";
-import type { Config, AgentsDiff, RemoteType, ShellResult } from "../types";
+import { diffAgentsFromLists, copyAgentsDir, listAgents, matchesAllowlist } from "./agents";
+import { getSyncFolders, type AgentDef } from "./agentDefs";
+import type { Config, FolderDiff, RemoteType, ShellResult } from "../types";
+
+function collectMatchingFolders(globalPath: string, syncDir: string, patterns: string[]): string[] {
+  const names = new Set<string>();
+  for (const dir of [globalPath, syncDir]) {
+    if (!existsSync(dir)) continue;
+    try {
+      for (const d of readdirSync(dir, { withFileTypes: true })) {
+        if (d.isDirectory() && matchesAllowlist(d.name, patterns)) {
+          names.add(d.name);
+        }
+      }
+    } catch {}
+  }
+  return [...names].sort();
+}
 
 export type FlowDeps = {
   checkGhInstalled: () => Promise<ShellResult>;
@@ -121,7 +138,7 @@ export async function runGitUrlValidation(
 
 export type AgentDiffEntry = {
   defs: AgentDef[];
-  diff: AgentsDiff;
+  folderDiffs: FolderDiff[];
   remoteCount: number;
   localCount: number;
 };
@@ -150,17 +167,29 @@ export async function runSyncLoad(
   const entries: AgentDiffEntry[] = [];
   for (const [globalPath, defs] of seen) {
     const syncDir = getSyncDirForAgent(globalPath);
-    const sourceDir = mode === "pull" ? syncDir : globalPath;
-    const destDir = mode === "pull" ? globalPath : syncDir;
-    const d = diffAgents(sourceDir, destDir);
-    const srcList = listAgents(sourceDir);
-    const dstList = listAgents(destDir);
-    if (srcList.length === 0 && dstList.length === 0) continue;
+    const folders = getSyncFolders(defs[0]!);
+
+    const folderDiffs: FolderDiff[] = [];
+    let remoteTotal = 0;
+    let localTotal = 0;
+
+    for (const folder of collectMatchingFolders(globalPath, syncDir, folders)) {
+      const srcFolder = join(mode === "pull" ? syncDir : globalPath, folder);
+      const dstFolder = join(mode === "pull" ? globalPath : syncDir, folder);
+      const srcList = listAgents(srcFolder);
+      const dstList = listAgents(dstFolder);
+      if (srcList.length === 0 && dstList.length === 0) continue;
+      remoteTotal += mode === "pull" ? srcList.length : dstList.length;
+      localTotal += mode === "pull" ? dstList.length : srcList.length;
+      folderDiffs.push({ folder, diff: diffAgentsFromLists(srcList, dstList) });
+    }
+
+    if (folderDiffs.length === 0) continue;
     entries.push({
       defs,
-      diff: d,
-      remoteCount: mode === "pull" ? srcList.length : dstList.length,
-      localCount: mode === "pull" ? dstList.length : srcList.length,
+      folderDiffs,
+      remoteCount: remoteTotal,
+      localCount: localTotal,
     });
   }
 
@@ -184,9 +213,11 @@ export async function runSyncExecute(
       if (copied.has(globalPath)) continue;
       copied.add(globalPath);
       const syncDir = getSyncDirForAgent(globalPath);
-      const sourceDir = mode === "pull" ? syncDir : globalPath;
-      const destDir = mode === "pull" ? globalPath : syncDir;
-      copyAgentsDir(sourceDir, destDir);
+      for (const fd of entry.folderDiffs) {
+        const srcFolder = join(mode === "pull" ? syncDir : globalPath, fd.folder);
+        const dstFolder = join(mode === "pull" ? globalPath : syncDir, fd.folder);
+        copyAgentsDir(srcFolder, dstFolder);
+      }
     }
   } catch (e: any) {
     return { type: "error", message: `Failed to copy agents: ${e.message}` };

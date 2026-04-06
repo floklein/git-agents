@@ -259,7 +259,7 @@ describe("runSyncLoad", () => {
 
   it("includes agent entries when local dir has skills", async () => {
     const base = useTmp();
-    mkdirSync(join(base, "my-skill"), { recursive: true });
+    mkdirSync(join(base, "skills", "my-skill"), { recursive: true });
 
     const agentDef: AgentDef = { id: "test-agent", name: "Test Agent", globalPath: base };
 
@@ -273,11 +273,13 @@ describe("runSyncLoad", () => {
     expect(diffs[0]!.defs[0]!.id).toBe("test-agent");
     expect(diffs[0]!.remoteCount).toBe(0);
     expect(diffs[0]!.localCount).toBe(1);
+    expect(diffs[0]!.folderDiffs).toHaveLength(1);
+    expect(diffs[0]!.folderDiffs[0]!.folder).toBe("skills");
   });
 
   it("groups agents sharing the same globalPath into one entry", async () => {
     const base = useTmp();
-    mkdirSync(join(base, "my-skill"), { recursive: true });
+    mkdirSync(join(base, "skills", "my-skill"), { recursive: true });
 
     const def1: AgentDef = { id: "agent-a", name: "Agent A", globalPath: base };
     const def2: AgentDef = { id: "agent-b", name: "Agent B", globalPath: base };
@@ -358,7 +360,7 @@ describe("runSyncExecute (push)", () => {
   it("returns error when copying agents throws", async () => {
     const fakeEntry: AgentDiffEntry = {
       defs: [{ id: "x", name: "X", globalPath: "/nonexistent/path/that/does/not/exist" }],
-      diff: { added: [], removed: [], modified: [], unchanged: [] },
+      folderDiffs: [{ folder: "skills", diff: { added: [], removed: [], modified: [], unchanged: [] } }],
       remoteCount: 0,
       localCount: 0,
     };

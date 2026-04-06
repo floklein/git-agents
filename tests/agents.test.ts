@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { listAgents, diffAgents, copyAgentsDir } from "../src/utils/agents";
+import { listAgents, diffAgents, copyAgentsDir, matchesAllowlist } from "../src/utils/agents";
 
 function mkTmp(): string {
   const dir = join(tmpdir(), `git-agents-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -69,6 +69,56 @@ describe("listAgents", () => {
     const result = listAgents(dir);
     expect(result).toHaveLength(1);
     expect(result[0]!.name).toBe("real-agent");
+  });
+
+  it("filters by allowedFolders when provided", () => {
+    const dir = useTmp();
+    mkAgent(dir, "skills", ["a.ts"]);
+    mkAgent(dir, "cache", ["b.ts"]);
+    mkAgent(dir, "commands", ["c.ts"]);
+
+    const result = listAgents(dir, ["skills", "commands"]);
+    expect(result).toHaveLength(2);
+    expect(result.map((e) => e.name)).toEqual(["commands", "skills"]);
+  });
+
+  it("supports glob patterns in allowedFolders", () => {
+    const dir = useTmp();
+    mkAgent(dir, "rules", ["a.ts"]);
+    mkAgent(dir, "rules-code", ["b.ts"]);
+    mkAgent(dir, "rules-architect", ["c.ts"]);
+    mkAgent(dir, "cache", ["d.ts"]);
+
+    const result = listAgents(dir, ["rules", "rules-*"]);
+    expect(result).toHaveLength(3);
+    expect(result.map((e) => e.name)).toEqual(["rules", "rules-architect", "rules-code"]);
+  });
+
+  it("returns all when allowedFolders is undefined", () => {
+    const dir = useTmp();
+    mkAgent(dir, "skills", ["a.ts"]);
+    mkAgent(dir, "cache", ["b.ts"]);
+
+    const result = listAgents(dir);
+    expect(result).toHaveLength(2);
+  });
+});
+
+describe("matchesAllowlist", () => {
+  it("matches exact names", () => {
+    expect(matchesAllowlist("skills", ["skills", "rules"])).toBe(true);
+    expect(matchesAllowlist("cache", ["skills", "rules"])).toBe(false);
+  });
+
+  it("matches glob prefix patterns", () => {
+    expect(matchesAllowlist("rules-code", ["rules-*"])).toBe(true);
+    expect(matchesAllowlist("rules-architect", ["rules-*"])).toBe(true);
+    expect(matchesAllowlist("rules", ["rules-*"])).toBe(false);
+    expect(matchesAllowlist("skills-code", ["rules-*"])).toBe(false);
+  });
+
+  it("returns false for empty patterns", () => {
+    expect(matchesAllowlist("anything", [])).toBe(false);
   });
 });
 
@@ -174,6 +224,21 @@ describe("diffAgents", () => {
     expect(diff.modified.map((e) => e.name)).toEqual(["will-modify"]);
     expect(diff.unchanged.map((e) => e.name)).toEqual(["will-stay"]);
   });
+
+  it("only diffs allowed folders when allowedFolders is provided", () => {
+    const src = useTmp();
+    const dst = useTmp();
+    mkAgent(src, "skills", ["a.ts"]);
+    mkAgent(src, "cache", ["b.ts"]);
+    mkAgent(dst, "skills", ["a.ts"]);
+    mkAgent(dst, "cache", ["c.ts"]);
+
+    const diff = diffAgents(src, dst, ["skills"]);
+    expect(diff.unchanged.map((e) => e.name)).toEqual(["skills"]);
+    expect(diff.added).toHaveLength(0);
+    expect(diff.removed).toHaveLength(0);
+    expect(diff.modified).toHaveLength(0);
+  });
 });
 
 describe("copyAgentsDir", () => {
@@ -198,5 +263,19 @@ describe("copyAgentsDir", () => {
     expect(existsSync(dst)).toBe(false);
     copyAgentsDir(src, dst);
     expect(existsSync(dst)).toBe(true);
+  });
+
+  it("only copies allowed folders when filtering", () => {
+    const src = useTmp();
+    const dst = useTmp();
+    mkAgent(src, "skills", ["a.ts"]);
+    mkAgent(src, "cache", ["b.ts"]);
+    mkAgent(src, "commands", ["c.ts"]);
+
+    copyAgentsDir(src, dst, ["skills", "commands"]);
+
+    const result = listAgents(dst);
+    expect(result).toHaveLength(2);
+    expect(result.map((e) => e.name)).toEqual(["commands", "skills"]);
   });
 });

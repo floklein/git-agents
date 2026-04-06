@@ -27,11 +27,24 @@ function computeContentHash(dir: string): string {
   return hash.digest("hex");
 }
 
-export function listAgents(dir: string): AgentEntry[] {
+export function matchesAllowlist(name: string, patterns: string[]): boolean {
+  for (const pattern of patterns) {
+    if (pattern.endsWith("-*")) {
+      const prefix = pattern.slice(0, -1);
+      if (name.startsWith(prefix)) return true;
+    } else if (name === pattern) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function listAgents(dir: string, allowedFolders?: string[]): AgentEntry[] {
   if (!existsSync(dir)) return [];
   try {
     return readdirSync(dir, { withFileTypes: true })
       .filter((d) => d.isDirectory())
+      .filter((d) => !allowedFolders || matchesAllowlist(d.name, allowedFolders))
       .map((d) => {
         const agentDir = join(dir, d.name);
         let fileCount = 0;
@@ -50,10 +63,7 @@ export function listAgents(dir: string): AgentEntry[] {
   }
 }
 
-export function diffAgents(sourceDir: string, destDir: string): AgentsDiff {
-  const source = listAgents(sourceDir);
-  const dest = listAgents(destDir);
-
+export function diffAgentsFromLists(source: AgentEntry[], dest: AgentEntry[]): AgentsDiff {
   const sourceMap = new Map(source.map((e) => [e.name, e]));
   const destMap = new Map(dest.map((e) => [e.name, e]));
 
@@ -84,7 +94,23 @@ export function diffAgents(sourceDir: string, destDir: string): AgentsDiff {
   return { added, removed, modified, unchanged };
 }
 
-export function copyAgentsDir(fromDir: string, toDir: string): void {
+export function diffAgents(sourceDir: string, destDir: string, allowedFolders?: string[]): AgentsDiff {
+  return diffAgentsFromLists(
+    listAgents(sourceDir, allowedFolders),
+    listAgents(destDir, allowedFolders),
+  );
+}
+
+export function copyAgentsDir(fromDir: string, toDir: string, allowedFolders?: string[]): void {
   mkdirSync(toDir, { recursive: true });
-  cpSync(fromDir, toDir, { recursive: true, force: true });
+  if (!allowedFolders) {
+    cpSync(fromDir, toDir, { recursive: true, force: true });
+    return;
+  }
+  const folders = readdirSync(fromDir, { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .filter((d) => matchesAllowlist(d.name, allowedFolders));
+  for (const folder of folders) {
+    cpSync(join(fromDir, folder.name), join(toDir, folder.name), { recursive: true, force: true });
+  }
 }
