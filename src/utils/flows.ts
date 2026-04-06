@@ -139,7 +139,6 @@ export async function runGitUrlValidation(
 export type AgentDiffEntry = {
   defs: AgentDef[];
   folderDiffs: FolderDiff[];
-  syncFolders: string[];
   remoteCount: number;
   localCount: number;
 };
@@ -189,7 +188,6 @@ export async function runSyncLoad(
     entries.push({
       defs,
       folderDiffs,
-      syncFolders: folders,
       remoteCount: remoteTotal,
       localCount: localTotal,
     });

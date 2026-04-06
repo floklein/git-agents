@@ -361,7 +361,6 @@ describe("runSyncExecute (push)", () => {
     const fakeEntry: AgentDiffEntry = {
       defs: [{ id: "x", name: "X", globalPath: "/nonexistent/path/that/does/not/exist" }],
       folderDiffs: [{ folder: "skills", diff: { added: [], removed: [], modified: [], unchanged: [] } }],
-      syncFolders: ["skills"],
       remoteCount: 0,
       localCount: 0,
     };
