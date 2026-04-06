@@ -1,9 +1,9 @@
 import { join } from "path";
 import { existsSync, readdirSync } from "fs";
 import { getSyncDirForAgent } from "./config";
-import { diffAgents, copyAgentsDir, listAgents, matchesAllowlist } from "./agents";
+import { diffAgentsFromLists, copyAgentsDir, listAgents, matchesAllowlist } from "./agents";
 import { getSyncFolders, type AgentDef } from "./agentDefs";
-import type { Config, AgentsDiff, FolderDiff, RemoteType, ShellResult } from "../types";
+import type { Config, FolderDiff, RemoteType, ShellResult } from "../types";
 
 function collectMatchingFolders(globalPath: string, syncDir: string, patterns: string[]): string[] {
   const names = new Set<string>();
@@ -177,13 +177,12 @@ export async function runSyncLoad(
     for (const folder of collectMatchingFolders(globalPath, syncDir, folders)) {
       const srcFolder = join(mode === "pull" ? syncDir : globalPath, folder);
       const dstFolder = join(mode === "pull" ? globalPath : syncDir, folder);
-      const d = diffAgents(srcFolder, dstFolder);
       const srcList = listAgents(srcFolder);
       const dstList = listAgents(dstFolder);
       if (srcList.length === 0 && dstList.length === 0) continue;
       remoteTotal += mode === "pull" ? srcList.length : dstList.length;
       localTotal += mode === "pull" ? dstList.length : srcList.length;
-      folderDiffs.push({ folder, diff: d });
+      folderDiffs.push({ folder, diff: diffAgentsFromLists(srcList, dstList) });
     }
 
     if (folderDiffs.length === 0) continue;

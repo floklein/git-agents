@@ -31,7 +31,7 @@ export function matchesAllowlist(name: string, patterns: string[]): boolean {
   for (const pattern of patterns) {
     if (pattern.endsWith("-*")) {
       const prefix = pattern.slice(0, -1);
-      if (name === pattern.slice(0, -2) || name.startsWith(prefix)) return true;
+      if (name.startsWith(prefix)) return true;
     } else if (name === pattern) {
       return true;
     }
@@ -63,10 +63,7 @@ export function listAgents(dir: string, allowedFolders?: string[]): AgentEntry[]
   }
 }
 
-export function diffAgents(sourceDir: string, destDir: string, allowedFolders?: string[]): AgentsDiff {
-  const source = listAgents(sourceDir, allowedFolders);
-  const dest = listAgents(destDir, allowedFolders);
-
+export function diffAgentsFromLists(source: AgentEntry[], dest: AgentEntry[]): AgentsDiff {
   const sourceMap = new Map(source.map((e) => [e.name, e]));
   const destMap = new Map(dest.map((e) => [e.name, e]));
 
@@ -95,6 +92,13 @@ export function diffAgents(sourceDir: string, destDir: string, allowedFolders?: 
   }
 
   return { added, removed, modified, unchanged };
+}
+
+export function diffAgents(sourceDir: string, destDir: string, allowedFolders?: string[]): AgentsDiff {
+  return diffAgentsFromLists(
+    listAgents(sourceDir, allowedFolders),
+    listAgents(destDir, allowedFolders),
+  );
 }
 
 export function copyAgentsDir(fromDir: string, toDir: string, allowedFolders?: string[]): void {

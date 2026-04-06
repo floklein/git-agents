@@ -113,7 +113,7 @@ describe("matchesAllowlist", () => {
   it("matches glob prefix patterns", () => {
     expect(matchesAllowlist("rules-code", ["rules-*"])).toBe(true);
     expect(matchesAllowlist("rules-architect", ["rules-*"])).toBe(true);
-    expect(matchesAllowlist("rules", ["rules-*"])).toBe(true);
+    expect(matchesAllowlist("rules", ["rules-*"])).toBe(false);
     expect(matchesAllowlist("skills-code", ["rules-*"])).toBe(false);
   });
 
@@ -223,6 +223,21 @@ describe("diffAgents", () => {
     expect(diff.removed.map((e) => e.name)).toEqual(["will-remove"]);
     expect(diff.modified.map((e) => e.name)).toEqual(["will-modify"]);
     expect(diff.unchanged.map((e) => e.name)).toEqual(["will-stay"]);
+  });
+
+  it("only diffs allowed folders when allowedFolders is provided", () => {
+    const src = useTmp();
+    const dst = useTmp();
+    mkAgent(src, "skills", ["a.ts"]);
+    mkAgent(src, "cache", ["b.ts"]);
+    mkAgent(dst, "skills", ["a.ts"]);
+    mkAgent(dst, "cache", ["c.ts"]);
+
+    const diff = diffAgents(src, dst, ["skills"]);
+    expect(diff.unchanged.map((e) => e.name)).toEqual(["skills"]);
+    expect(diff.added).toHaveLength(0);
+    expect(diff.removed).toHaveLength(0);
+    expect(diff.modified).toHaveLength(0);
   });
 });
 
