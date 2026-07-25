@@ -1,4 +1,16 @@
 import { homedir } from "os";
+import {
+  closeSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "fs";
+import { randomUUID } from "crypto";
+import { isAbsolute, join } from "path";
 import { getLocalSyncPath, getRemoteSyncPath } from "./config";
 import {
   compareSyncPathSnapshots,
@@ -156,8 +168,121 @@ export type SyncLoadResult =
   | { type: "ok"; agentDiffs: AgentDiffEntry[] }
   | { type: "error"; message: string };
 
-function syncRoot(path: string): string {
-  return path.split("/")[0]!;
+export const SYNC_MANIFEST_FILE = ".git-agents-sync.json";
+
+type SyncManifest = {
+  version: 1;
+  paths: string[];
+};
+
+function isSafeManifestPath(path: unknown): path is string {
+  if (
+    typeof path !== "string" ||
+    !path ||
+    path.trim() !== path ||
+    path.includes("\\") ||
+    isAbsolute(path) ||
+    /^[A-Za-z]:\//.test(path)
+  ) {
+    return false;
+  }
+
+  return path
+    .split("/")
+    .every((segment) => segment !== "" && segment !== "." && segment !== "..");
+}
+
+function readSyncManifest(configDir: string): SyncManifest | null {
+  const manifestPath = join(configDir, SYNC_MANIFEST_FILE);
+  let manifestStat;
+  try {
+    manifestStat = lstatSync(manifestPath);
+  } catch (error: any) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  if (manifestStat.isSymbolicLink() || !manifestStat.isFile()) {
+    throw new Error(`${SYNC_MANIFEST_FILE} must be a regular file`);
+  }
+
+  let descriptor: number | undefined;
+  let text: string;
+  try {
+    descriptor = openSync(manifestPath, "r");
+    const openedStat = fstatSync(descriptor);
+    if (
+      !openedStat.isFile() ||
+      openedStat.dev !== manifestStat.dev ||
+      openedStat.ino !== manifestStat.ino
+    ) {
+      throw new Error(`${SYNC_MANIFEST_FILE} changed while it was being read`);
+    }
+    text = readFileSync(descriptor, "utf8");
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new Error(`${SYNC_MANIFEST_FILE} is not valid JSON`);
+  }
+
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("version" in value) ||
+    value.version !== 1 ||
+    !("paths" in value) ||
+    !Array.isArray(value.paths) ||
+    !value.paths.every(isSafeManifestPath)
+  ) {
+    throw new Error(`${SYNC_MANIFEST_FILE} has an unsupported format`);
+  }
+
+  return {
+    version: 1,
+    paths: [...new Set(value.paths)],
+  };
+}
+
+function writeSyncManifest(configDir: string, paths: Iterable<string>): void {
+  const manifest: SyncManifest = {
+    version: 1,
+    paths: [...new Set(paths)].sort(),
+  };
+  const manifestPath = join(configDir, SYNC_MANIFEST_FILE);
+  try {
+    const existing = lstatSync(manifestPath);
+    if (existing.isSymbolicLink() || !existing.isFile()) {
+      throw new Error(`${SYNC_MANIFEST_FILE} must be a regular file`);
+    }
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+
+  const temporaryPath = join(
+    configDir,
+    `.${SYNC_MANIFEST_FILE}.git-agents-${randomUUID()}`,
+  );
+  try {
+    writeFileSync(
+      temporaryPath,
+      `${JSON.stringify(manifest, null, 2)}\n`,
+      { encoding: "utf8", flag: "wx", mode: 0o600 },
+    );
+    renameSync(temporaryPath, manifestPath);
+  } finally {
+    rmSync(temporaryPath, { force: true });
+  }
+}
+
+function snapshotsMatch(
+  first: SyncPathSnapshot | null,
+  second: SyncPathSnapshot | null,
+): boolean {
+  return compareSyncPathSnapshots(first, second) === "unchanged";
 }
 
 export async function runSyncLoad(
@@ -174,6 +299,8 @@ export async function runSyncLoad(
 
   const entries: AgentDiffEntry[] = [];
   try {
+    const initializedPaths = new Set(readSyncManifest(configDir)?.paths ?? []);
+
     for (const def of agentDefs) {
       const pathDiffs = def.syncPaths.map((path): SyncPathDiff => {
         const localPath = getLocalSyncPath(path, homeDir);
@@ -194,18 +321,11 @@ export async function runSyncLoad(
         };
       });
 
-      const sourceRoots = new Set(
-        pathDiffs
-          .filter((diff) =>
-            mode === "pull" ? diff.remote !== null : diff.local !== null
-          )
-          .map((diff) => syncRoot(diff.path)),
-      );
       const existingPathDiffs = pathDiffs.filter((diff) => {
         const source = mode === "pull" ? diff.remote : diff.local;
         const destination = mode === "pull" ? diff.local : diff.remote;
         return source !== null ||
-          (destination !== null && sourceRoots.has(syncRoot(diff.path)));
+          (destination !== null && initializedPaths.has(diff.path));
       });
       if (existingPathDiffs.length === 0) continue;
 
@@ -243,7 +363,36 @@ export async function runSyncExecute(
   deps: Pick<FlowDeps, "gitAddCommitPush">
 ): Promise<SyncExecuteResult> {
   const copied = new Set<string>();
+  let manifest: SyncManifest | null = null;
   try {
+    if (mode === "push") {
+      manifest = readSyncManifest(configDir);
+    }
+
+    for (const entry of agentDiffs) {
+      for (const pathDiff of entry.pathDiffs) {
+        const reviewedSides = mode === "pull"
+          ? [
+              ["Remote", pathDiff.remotePath, pathDiff.remote] as const,
+              ["Local", pathDiff.localPath, pathDiff.local] as const,
+            ]
+          : [
+              ["Local", pathDiff.localPath, pathDiff.local] as const,
+              ["Remote", pathDiff.remotePath, pathDiff.remote] as const,
+            ];
+
+        for (const [side, path, reviewedSnapshot] of reviewedSides) {
+          const currentSnapshot = snapshotSyncPath(path);
+          if (!snapshotsMatch(currentSnapshot, reviewedSnapshot)) {
+            throw new Error(
+              `${side} path changed since review: ${pathDiff.path}. ` +
+              "Review the changes again before syncing.",
+            );
+          }
+        }
+      }
+    }
+
     for (const entry of agentDiffs) {
       for (const pathDiff of entry.pathDiffs) {
         if (pathDiff.status === "unchanged") continue;
@@ -253,12 +402,18 @@ export async function runSyncExecute(
         const sourceBasePath = mode === "pull"
           ? pathDiff.remoteBasePath
           : pathDiff.localBasePath;
+        const sourceSnapshot = mode === "pull"
+          ? pathDiff.remote
+          : pathDiff.local;
         const destinationPath = mode === "pull"
           ? pathDiff.localPath
           : pathDiff.remotePath;
         const destinationBasePath = mode === "pull"
           ? pathDiff.localBasePath
           : pathDiff.remoteBasePath;
+        const destinationSnapshot = mode === "pull"
+          ? pathDiff.local
+          : pathDiff.remote;
         const copyKey = `${sourcePath}\0${destinationPath}`;
         if (copied.has(copyKey)) continue;
         copied.add(copyKey);
@@ -267,7 +422,39 @@ export async function runSyncExecute(
           destinationPath,
           sourceBasePath,
           destinationBasePath,
+          {
+            source: sourceSnapshot,
+            destination: destinationSnapshot,
+          },
         );
+      }
+    }
+
+    for (const entry of agentDiffs) {
+      for (const pathDiff of entry.pathDiffs) {
+        const sourcePath = mode === "pull"
+          ? pathDiff.remotePath
+          : pathDiff.localPath;
+        const sourceSnapshot = mode === "pull"
+          ? pathDiff.remote
+          : pathDiff.local;
+        const destinationPath = mode === "pull"
+          ? pathDiff.localPath
+          : pathDiff.remotePath;
+        const currentSource = snapshotSyncPath(sourcePath);
+        const currentDestination = snapshotSyncPath(destinationPath);
+        if (!snapshotsMatch(currentSource, sourceSnapshot)) {
+          throw new Error(
+            `Source path changed during sync: ${pathDiff.path}. ` +
+            "Review the changes again before syncing.",
+          );
+        }
+        if (!snapshotsMatch(currentDestination, sourceSnapshot)) {
+          throw new Error(
+            `Destination path changed during sync: ${pathDiff.path}. ` +
+            "Review the changes again before syncing.",
+          );
+        }
       }
     }
   } catch (e: any) {
@@ -275,6 +462,24 @@ export async function runSyncExecute(
   }
 
   if (mode === "push") {
+    const initializedPaths = new Set(manifest?.paths ?? []);
+    for (const entry of agentDiffs) {
+      for (const pathDiff of entry.pathDiffs) {
+        initializedPaths.add(pathDiff.path);
+      }
+    }
+    const wroteManifest = agentDiffs.length > 0;
+    if (wroteManifest) {
+      try {
+        writeSyncManifest(configDir, initializedPaths);
+      } catch (e: any) {
+        return {
+          type: "error",
+          message: `Failed to write sync manifest: ${e.message}`,
+        };
+      }
+    }
+
     const managedPaths = [
       ...new Set(
         agentDiffs.flatMap((entry) =>
@@ -282,6 +487,9 @@ export async function runSyncExecute(
         ),
       ),
     ];
+    if (wroteManifest) {
+      managedPaths.push(SYNC_MANIFEST_FILE);
+    }
     const pushResult = await deps.gitAddCommitPush(
       configDir,
       `sync: update harness files from local (${new Date().toISOString().slice(0, 10)})`,

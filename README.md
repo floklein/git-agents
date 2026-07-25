@@ -54,21 +54,22 @@ On first launch, `ga` walks you through setup:
 Both operations show a comparison summary before doing anything:
 
 ```
+  Comparison                         Harness 1/5
   Remote: 12 files         Local: 10 files
 
   Claude Code
   + .claude/agents
   ~ .claude/CLAUDE.md
 
-  Codex
-  = .agents/skills
-
   Confirm pull? [No, cancel] [Yes, pull]
+  ←/→ review harnesses
 ```
 
 **No is always the default**. Nothing happens unless you explicitly confirm.
 
-After confirmation, changed paths are mirrored from the source side. A harness with none of its selected paths at the source is skipped, so pushing from a machine without that harness does not erase its remote files. Push commits are limited to the listed harness paths.
+Use Left/Right or Page Up/Page Down to review every populated harness before confirming.
+
+After confirmation, changed paths are mirrored from the source side. The remote `.git-agents-sync.json` manifest records paths initialized by a reviewed push. An absent path is treated as a deletion only after initialization, so upgrading an older remote cannot erase newly supported local files. Push commits are limited to the listed harness paths and this manifest. Unrelated local commits are refused, while a failed scoped sync push can be retried safely.
 
 ### Edit config
 
@@ -83,7 +84,7 @@ Select **Edit Config** from the main menu to reconfigure your remote at any time
 
 ## Supported harnesses
 
-Only the paths below are synced. A trailing `/` means the full user-authored directory tree.
+Only the paths below are synced. A trailing `/` means the full directory tree. Files matched by repository or global Git ignore rules are still included inside these explicitly selected paths.
 
 | Harness | Synced paths |
 |---------|--------------|
@@ -93,6 +94,8 @@ Only the paths below are synced. A trailing `/` means the full user-authored dir
 | Gemini CLI | `~/.gemini/GEMINI.md`<br>`~/.gemini/agents/`<br>`~/.gemini/commands/`<br>`~/.gemini/skills/` |
 | OpenCode | `~/.config/opencode/AGENTS.md`<br>`~/.config/opencode/agents/`<br>`~/.config/opencode/commands/`<br>`~/.config/opencode/skills/` |
 
-Generated state, general settings, authentication data, caches, sessions, and managed installs are excluded. Everything outside the paths above is ignored.
+Generated state, general settings, authentication data, caches, sessions, and managed installs outside the paths above are excluded. Everything inside a selected directory is treated as portable content, so keep machine-specific files outside it.
+
+On Windows, a selected leaf directory junction syncs the contents of its target. Pulling into an existing junction updates that target without replacing the junction. POSIX executable state is preserved for synced files.
 
 Paths committed by older releases remain in the remote checkout for safe manual cleanup. Current sync ignores them and does not copy, stage, or commit them.

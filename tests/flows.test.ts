@@ -4,6 +4,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "path";
@@ -16,6 +17,7 @@ import {
   runGitUrlValidation,
   runSyncLoad,
   runSyncExecute,
+  SYNC_MANIFEST_FILE,
   type AgentDiffEntry,
 } from "../src/utils/flows";
 import type { AgentDef } from "../src/utils/agentDefs";
@@ -249,6 +251,14 @@ function testAgent(syncPaths: string[]): AgentDef {
   };
 }
 
+function fixtureManifest(root: string, paths: string[]): string {
+  return fixtureFile(
+    root,
+    SYNC_MANIFEST_FILE,
+    `${JSON.stringify({ version: 1, paths }, null, 2)}\n`,
+  );
+}
+
 function loadedDiffs(
   result: Awaited<ReturnType<typeof runSyncLoad>>,
 ): AgentDiffEntry[] {
@@ -362,6 +372,109 @@ describe("runSyncLoad", () => {
     ]);
     expect(diffs[0]!.localCount).toBe(1);
   });
+
+  it.each([
+    {
+      harness: "Claude Code",
+      legacyPath: ".claude/skills/review/SKILL.md",
+      currentPath: ".claude/CLAUDE.md",
+      syncPaths: [
+        ".claude/CLAUDE.md",
+        ".claude/agents",
+        ".claude/rules",
+        ".claude/skills",
+        ".claude/commands",
+      ],
+    },
+    {
+      harness: "Gemini CLI",
+      legacyPath: ".gemini/commands/review.toml",
+      currentPath: ".gemini/GEMINI.md",
+      syncPaths: [
+        ".gemini/GEMINI.md",
+        ".gemini/agents",
+        ".gemini/commands",
+        ".gemini/skills",
+      ],
+    },
+    {
+      harness: "OpenCode",
+      legacyPath: ".config/opencode/commands/review.md",
+      currentPath: ".config/opencode/AGENTS.md",
+      syncPaths: [
+        ".config/opencode/AGENTS.md",
+        ".config/opencode/agents",
+        ".config/opencode/commands",
+        ".config/opencode/skills",
+      ],
+    },
+  ])(
+    "preserves newly selected local $harness paths when pulling a legacy remote",
+    async ({ legacyPath, currentPath, syncPaths }) => {
+      const configDir = useTmp();
+      const homeDir = useTmp();
+      const def = testAgent(syncPaths);
+      fixtureFile(configDir, legacyPath, "legacy remote");
+      const localCurrent = fixtureFile(homeDir, currentPath, "keep local");
+
+      const loadResult = await runSyncLoad("pull", [def], configDir, {
+        gitPull: ok(),
+      }, homeDir);
+      const diffs = loadedDiffs(loadResult);
+
+      expect(diffs).toHaveLength(1);
+      expect(diffs[0]!.pathDiffs.map((diff) => diff.path))
+        .not.toContain(currentPath);
+
+      const executeResult = await runSyncExecute(
+        "pull",
+        diffs,
+        configDir,
+        { gitAddCommitPush: ok() },
+      );
+
+      expect(executeResult.type).toBe("ok");
+      expect(readFileSync(localCurrent, "utf8")).toBe("keep local");
+    },
+  );
+
+  it("treats an initialized missing path as an explicit tombstone", async () => {
+    const configDir = useTmp();
+    const homeDir = useTmp();
+    const syncPaths = [
+      ".claude/CLAUDE.md",
+      ".claude/skills",
+    ];
+    const def = testAgent(syncPaths);
+    fixtureManifest(configDir, syncPaths);
+    fixtureFile(configDir, ".claude/skills/review/SKILL.md", "review");
+    const localInstructions = fixtureFile(
+      homeDir,
+      ".claude/CLAUDE.md",
+      "delete after initialization",
+    );
+
+    const loadResult = await runSyncLoad("pull", [def], configDir, {
+      gitPull: ok(),
+    }, homeDir);
+    const diffs = loadedDiffs(loadResult);
+
+    expect(diffs[0]!.pathDiffs.map((diff) => [diff.path, diff.status]))
+      .toEqual([
+        [".claude/CLAUDE.md", "removed"],
+        [".claude/skills", "added"],
+      ]);
+
+    const executeResult = await runSyncExecute(
+      "pull",
+      diffs,
+      configDir,
+      { gitAddCommitPush: ok() },
+    );
+
+    expect(executeResult.type).toBe("ok");
+    expect(existsSync(localInstructions)).toBe(false);
+  });
 });
 
 // ---- runSyncExecute ----
@@ -451,6 +564,7 @@ describe("runSyncExecute (push)", () => {
     expect(pushedPaths).toEqual([
       ".gemini/GEMINI.md",
       ".gemini/commands",
+      SYNC_MANIFEST_FILE,
     ]);
     expect(
       readFileSync(join(configDir, ".gemini", "GEMINI.md"), "utf8"),
@@ -478,6 +592,7 @@ describe("runSyncExecute (push)", () => {
     fixtureFile(configDir, ".codex/AGENTS.md", "shared instructions");
     const staleRemoteAgents = join(configDir, ".codex", "agents");
     fixtureFile(configDir, ".codex/agents/legacy.md", "legacy");
+    fixtureManifest(configDir, def.syncPaths);
 
     const loadResult = await runSyncLoad("push", [def], configDir, {
       gitPull: ok(),
@@ -503,6 +618,7 @@ describe("runSyncExecute (push)", () => {
     expect(pushedPaths).toEqual([
       ".codex/AGENTS.md",
       ".codex/agents",
+      SYNC_MANIFEST_FILE,
     ]);
     expect(existsSync(join(configDir, ".codex", "AGENTS.md"))).toBe(true);
     expect(existsSync(staleRemoteAgents)).toBe(false);
@@ -539,6 +655,92 @@ describe("runSyncExecute (push)", () => {
 
     expect(result.type).toBe("ok");
     expect(existsSync(remoteInstructions)).toBe(true);
+  });
+
+  it("records only reviewed paths in the manifest on the first successful push", async () => {
+    const configDir = useTmp();
+    const homeDir = useTmp();
+    const def = testAgent([
+      ".claude/CLAUDE.md",
+      ".claude/agents",
+      ".claude/rules",
+    ]);
+    fixtureFile(homeDir, ".claude/CLAUDE.md", "instructions");
+
+    const loadResult = await runSyncLoad("push", [def], configDir, {
+      gitPull: ok(),
+    }, homeDir);
+    const diffs = loadedDiffs(loadResult);
+    let pushedPaths: string[] = [];
+
+    const executeResult = await runSyncExecute(
+      "push",
+      diffs,
+      configDir,
+      {
+        gitAddCommitPush: async (_dir, _message, paths) => {
+          pushedPaths = paths;
+          return { ok: true };
+        },
+      },
+    );
+
+    expect(executeResult.type).toBe("ok");
+    expect(pushedPaths).toEqual([
+      ".claude/CLAUDE.md",
+      SYNC_MANIFEST_FILE,
+    ]);
+    expect(
+      JSON.parse(
+        readFileSync(join(configDir, SYNC_MANIFEST_FILE), "utf8"),
+      ),
+    ).toEqual({
+      version: 1,
+      paths: [
+        ".claude/CLAUDE.md",
+      ],
+    });
+  });
+
+  it("rejects a symlinked manifest without writing through it", async () => {
+    const configDir = useTmp();
+    const homeDir = useTmp();
+    const outsideDir = useTmp();
+    const outsideManifest = join(outsideDir, "outside.json");
+    const def = testAgent([".claude/CLAUDE.md"]);
+    fixtureFile(homeDir, ".claude/CLAUDE.md", "instructions");
+    const loadResult = await runSyncLoad("push", [def], configDir, {
+      gitPull: ok(),
+    }, homeDir);
+    const diffs = loadedDiffs(loadResult);
+    symlinkSync(
+      outsideManifest,
+      join(configDir, SYNC_MANIFEST_FILE),
+      "file",
+    );
+    let pushCalled = false;
+
+    const executeResult = await runSyncExecute(
+      "push",
+      diffs,
+      configDir,
+      {
+        gitAddCommitPush: async () => {
+          pushCalled = true;
+          return { ok: true };
+        },
+      },
+    );
+
+    expect(executeResult.type).toBe("error");
+    if (executeResult.type === "error") {
+      expect(executeResult.message).toContain("must be a regular file");
+    }
+    expect(pushCalled).toBe(false);
+    expect(existsSync(outsideManifest)).toBe(false);
+    expect(
+      existsSync(join(configDir, ".claude", "CLAUDE.md")),
+    ).toBe(false);
   });
 
   it("returns ok when gitAddCommitPush reports nothing to commit", async () => {
@@ -606,6 +808,79 @@ describe("runSyncExecute (push)", () => {
     }
     expect(pushCalled).toBe(false);
   });
+});
+
+describe("runSyncExecute stale review safety", () => {
+  it.each([
+    { mode: "pull" as const, changedSide: "source" as const },
+    { mode: "pull" as const, changedSide: "destination" as const },
+    { mode: "push" as const, changedSide: "source" as const },
+    { mode: "push" as const, changedSide: "destination" as const },
+  ])(
+    "does not mutate any path when the $changedSide changes before $mode",
+    async ({ mode, changedSide }) => {
+      const configDir = useTmp();
+      const homeDir = useTmp();
+      const def = testAgent([
+        ".claude/CLAUDE.md",
+        ".claude/agents",
+      ]);
+      const localInstructions = fixtureFile(
+        homeDir,
+        ".claude/CLAUDE.md",
+        "local instructions",
+      );
+      const remoteInstructions = fixtureFile(
+        configDir,
+        ".claude/CLAUDE.md",
+        "remote instructions",
+      );
+      const localAgent = fixtureFile(
+        homeDir,
+        ".claude/agents/reviewer.md",
+        "local agent",
+      );
+      const remoteAgent = fixtureFile(
+        configDir,
+        ".claude/agents/reviewer.md",
+        "remote agent",
+      );
+
+      const loadResult = await runSyncLoad(mode, [def], configDir, {
+        gitPull: ok(),
+      }, homeDir);
+      const diffs = loadedDiffs(loadResult);
+      const changedPath = changedSide === "source"
+        ? mode === "pull" ? remoteAgent : localAgent
+        : mode === "pull" ? localAgent : remoteAgent;
+      writeFileSync(changedPath, "changed after review");
+
+      let pushCalled = false;
+      const executeResult = await runSyncExecute(
+        mode,
+        diffs,
+        configDir,
+        {
+          gitAddCommitPush: async () => {
+            pushCalled = true;
+            return { ok: true };
+          },
+        },
+      );
+
+      expect(executeResult.type).toBe("error");
+      if (executeResult.type === "error") {
+        expect(executeResult.message).toContain("changed since review");
+      }
+      expect(pushCalled).toBe(false);
+      expect(readFileSync(localInstructions, "utf8"))
+        .toBe("local instructions");
+      expect(readFileSync(remoteInstructions, "utf8"))
+        .toBe("remote instructions");
+      expect(readFileSync(changedPath, "utf8"))
+        .toBe("changed after review");
+    },
+  );
 });
 
 for (const mode of ["pull", "push"] as const) {

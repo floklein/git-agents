@@ -88,7 +88,7 @@ describe("24-row layouts", () => {
     view.unmount();
   });
 
-  it("keeps confirmation visible with all five harnesses populated", async () => {
+  it("keeps every populated harness path reviewable at 24 rows", async () => {
     syncState.agentDiffs = populatedAgentDiffs();
     const view = render(
       <Box height={24}>
@@ -100,12 +100,30 @@ describe("24-row layouts", () => {
       </Box>,
     );
 
-    await vi.waitFor(() => {
-      const frame = view.lastFrame();
-      expect(frame).toContain("Confirm push?");
-      expect(frame).toContain("Apply changes");
-      expect(frame).toContain("Esc to cancel");
-    });
+    const reviewedPaths = new Set<string>();
+    for (const [index, def] of AGENT_DEFS.entries()) {
+      await vi.waitFor(() => {
+        const frame = view.lastFrame() ?? "";
+        expect(frame.split("\n")).toHaveLength(24);
+        expect(frame).toContain(`Harness ${index + 1}/${AGENT_DEFS.length}`);
+        expect(frame).toContain(def.name);
+        expect(frame).toContain("Confirm push?");
+        expect(frame).toContain("Apply changes");
+        expect(frame).toContain("←/→ review harnesses");
+        for (const path of def.syncPaths) {
+          expect(frame).toContain(path);
+          reviewedPaths.add(path);
+        }
+      });
+
+      if (index < AGENT_DEFS.length - 1) {
+        view.stdin.write("\u001B[C");
+      }
+    }
+
+    expect([...reviewedPaths].sort()).toEqual(
+      AGENT_DEFS.flatMap((def) => def.syncPaths).sort(),
+    );
     view.unmount();
   });
 });

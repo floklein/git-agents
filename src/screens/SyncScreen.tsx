@@ -23,12 +23,27 @@ export function SyncScreen({ mode, signal, onBack }: Props) {
   const [stage, setStage] = useState<Stage>("loading");
   const [status, setStatus] = useState("Fetching remote...");
   const [agentDiffs, setAgentDiffs] = useState<AgentDiffEntry[]>([]);
+  const [reviewPage, setReviewPage] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [doneMessage, setDoneMessage] = useState("");
 
   useInput((_input, key) => {
     if (key.escape && (stage === "done" || stage === "review")) {
       onBack();
+      return;
+    }
+
+    if (stage !== "review" || agentDiffs.length <= 1) return;
+
+    if (key.leftArrow || key.pageUp) {
+      setReviewPage((current) => Math.max(0, current - 1));
+      return;
+    }
+
+    if (key.rightArrow || key.pageDown) {
+      setReviewPage((current) =>
+        Math.min(agentDiffs.length - 1, current + 1)
+      );
     }
   });
 
@@ -54,6 +69,7 @@ export function SyncScreen({ mode, signal, onBack }: Props) {
       }
       setStatus("Comparing files...");
       setAgentDiffs(result.agentDiffs);
+      setReviewPage(0);
       setStage("review");
     }
     void load();
@@ -129,6 +145,7 @@ export function SyncScreen({ mode, signal, onBack }: Props) {
   const hasChanges = agentDiffs.some((entry) =>
     entry.pathDiffs.some((pathDiff) => pathDiff.status !== "unchanged"),
   );
+  const currentEntry = agentDiffs[reviewPage];
 
   return (
     <Box
@@ -143,11 +160,17 @@ export function SyncScreen({ mode, signal, onBack }: Props) {
         flexDirection="column"
         borderStyle="round"
         paddingX={2}
-        paddingY={1}
         width={60}
-        marginTop={1}
+        flexShrink={0}
       >
-        <Text bold>Comparison</Text>
+        <Box flexDirection="row" justifyContent="space-between">
+          <Text bold>Comparison</Text>
+          {agentDiffs.length > 1 && (
+            <Text dimColor>
+              Harness {reviewPage + 1}/{agentDiffs.length}
+            </Text>
+          )}
+        </Box>
         <Box flexDirection="row" justifyContent="space-between">
           <Text>
             Remote: <Text color="#8be9fd">{totalRemote} files</Text>
@@ -157,23 +180,19 @@ export function SyncScreen({ mode, signal, onBack }: Props) {
           </Text>
         </Box>
 
-        {agentDiffs.length === 0 && (
+        {!currentEntry && (
           <Text dimColor>No synced files found</Text>
         )}
 
-        {agentDiffs.map((entry) => (
-          <Box
-            key={entry.def.id}
-            flexDirection="column"
-            marginTop={1}
-          >
+        {currentEntry && (
+          <Box key={currentEntry.def.id} flexDirection="column">
             <Box flexDirection="row" justifyContent="space-between">
-              <Text color="#bd93f9">{entry.def.name}</Text>
+              <Text color="#bd93f9">{currentEntry.def.name}</Text>
               <Text dimColor>
-                {entry.remoteCount}↓ / {entry.localCount}↑
+                {currentEntry.remoteCount}↓ / {currentEntry.localCount}↑
               </Text>
             </Box>
-            {entry.pathDiffs.map((pathDiff) => {
+            {currentEntry.pathDiffs.map((pathDiff) => {
               const marker = pathDiff.status === "added"
                 ? "+"
                 : pathDiff.status === "removed"
@@ -200,7 +219,7 @@ export function SyncScreen({ mode, signal, onBack }: Props) {
               );
             })}
           </Box>
-        ))}
+        )}
       </Box>
 
       <Box
@@ -238,7 +257,11 @@ export function SyncScreen({ mode, signal, onBack }: Props) {
       </Box>
 
       <Box flexShrink={0}>
-        <Text dimColor>Esc to cancel</Text>
+        <Text dimColor>
+          {agentDiffs.length > 1
+            ? "←/→ review harnesses  Esc to cancel"
+            : "Esc to cancel"}
+        </Text>
       </Box>
     </Box>
   );

@@ -8,6 +8,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
 } from "fs";
 import { createHash, randomUUID, type Hash } from "crypto";
 import {
@@ -31,8 +32,14 @@ function hashPath(
   path: string,
   hash: Hash,
   count: { files: number },
+  followDirectoryLink = false,
+  ancestorDirectories = new Set<string>(),
 ): void {
-  const stat = lstatSync(path);
+  const linkStat = lstatSync(path);
+  const directoryLinkTarget = windowsDirectoryLinkTarget(path, linkStat);
+  const stat = followDirectoryLink || directoryLinkTarget
+    ? statSync(path)
+    : linkStat;
   const relativePath = normalizedRelativePath(root, path);
 
   if (stat.isSymbolicLink()) {
@@ -49,6 +56,8 @@ function hashPath(
     hash.update("file\0");
     hash.update(relativePath);
     hash.update("\0");
+    hash.update(stat.mode & 0o100 ? "executable" : "non-executable");
+    hash.update("\0");
     hash.update(readFileSync(path));
     hash.update("\0");
     count.files += 1;
@@ -56,14 +65,25 @@ function hashPath(
   }
 
   if (stat.isDirectory()) {
+    const canonicalDirectory = comparablePath(realpathSync(path));
+    if (ancestorDirectories.has(canonicalDirectory)) {
+      throw new Error(
+        `Refusing to snapshot a directory link whose target contains the link: ${path}`,
+      );
+    }
+    ancestorDirectories.add(canonicalDirectory);
     hash.update("directory\0");
     hash.update(relativePath);
     hash.update("\0");
-    const children = readdirSync(path)
-      .sort((a, b) => a < b ? -1 : a > b ? 1 : 0)
-      .map((name) => resolve(path, name));
-    for (const child of children) {
-      hashPath(root, child, hash, count);
+    try {
+      const children = readdirSync(path)
+        .sort((a, b) => a < b ? -1 : a > b ? 1 : 0)
+        .map((name) => resolve(path, name));
+      for (const child of children) {
+        hashPath(root, child, hash, count, false, ancestorDirectories);
+      }
+    } finally {
+      ancestorDirectories.delete(canonicalDirectory);
     }
     return;
   }
@@ -71,6 +91,21 @@ function hashPath(
   hash.update("other\0");
   hash.update(relativePath);
   hash.update("\0");
+}
+
+function windowsDirectoryLinkTarget(
+  path: string,
+  linkStat = lstatSync(path),
+): string | null {
+  if (process.platform !== "win32" || !linkStat.isSymbolicLink()) return null;
+
+  try {
+    if (!statSync(path).isDirectory()) return null;
+    return realpathSync(path);
+  } catch (error: any) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return null;
+    throw error;
+  }
 }
 
 export function snapshotSyncPath(path: string): SyncPathSnapshot | null {
@@ -82,15 +117,18 @@ export function snapshotSyncPath(path: string): SyncPathSnapshot | null {
     throw error;
   }
 
+  const directoryLinkTarget = windowsDirectoryLinkTarget(path, stat);
   const hash = createHash("sha256");
   const count = { files: 0 };
-  hashPath(path, path, hash, count);
+  hashPath(path, path, hash, count, directoryLinkTarget !== null);
 
-  const kind = stat.isSymbolicLink()
-    ? "symlink"
-    : stat.isDirectory()
-      ? "directory"
-      : "file";
+  const kind = directoryLinkTarget
+    ? "directory"
+    : stat.isSymbolicLink()
+      ? "symlink"
+      : stat.isDirectory()
+        ? "directory"
+        : "file";
 
   return {
     kind,
@@ -148,6 +186,57 @@ function resolvedExistingPath(path: string): string | null {
     if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return null;
     throw error;
   }
+}
+
+function resolvedPathWithExistingAncestor(path: string): string {
+  const missingParts: string[] = [];
+  let current = resolve(path);
+
+  while (!pathExists(current)) {
+    const parent = dirname(current);
+    if (parent === current) return current;
+    missingParts.unshift(basename(current));
+    current = parent;
+  }
+
+  return resolve(resolvedExistingPath(current) ?? current, ...missingParts);
+}
+
+function assertDirectoryLinkTargetDoesNotContainLink(
+  linkPath: string,
+  canonicalTargetPath: string,
+): void {
+  const canonicalLinkPath = resolve(
+    resolvedPathWithExistingAncestor(dirname(linkPath)),
+    basename(linkPath),
+  );
+  if (isSameOrDescendant(canonicalTargetPath, canonicalLinkPath)) {
+    throw new Error(
+      `Refusing to mirror a directory link whose target contains the link: ${linkPath}`,
+    );
+  }
+}
+
+function assertNoSelfContainingDirectoryLinks(rootPath: string): void {
+  if (process.platform !== "win32") return;
+
+  const visit = (path: string): void => {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) {
+      const directoryTarget = windowsDirectoryLinkTarget(path, stat);
+      if (directoryTarget) {
+        assertDirectoryLinkTargetDoesNotContainLink(path, directoryTarget);
+      }
+      return;
+    }
+    if (!stat.isDirectory()) return;
+
+    for (const child of readdirSync(path)) {
+      visit(resolve(path, child));
+    }
+  };
+
+  visit(rootPath);
 }
 
 function assertSafeSyncPath(basePath: string, targetPath: string): void {
@@ -230,6 +319,10 @@ export function mirrorSyncPath(
   toPath: string,
   fromBasePath?: string,
   toBasePath?: string,
+  reviewedSnapshots?: {
+    source: SyncPathSnapshot | null;
+    destination: SyncPathSnapshot | null;
+  },
 ): void {
   if (comparablePath(fromPath) === comparablePath(toPath)) return;
 
@@ -238,6 +331,19 @@ export function mirrorSyncPath(
 
   const source = snapshotSyncPath(fromPath);
   const destination = snapshotSyncPath(toPath);
+  if (
+    reviewedSnapshots &&
+    compareSyncPathSnapshots(reviewedSnapshots.source, source) !== "unchanged"
+  ) {
+    throw new Error(`Source changed since review: ${fromPath}`);
+  }
+  if (
+    reviewedSnapshots &&
+    compareSyncPathSnapshots(reviewedSnapshots.destination, destination) !==
+      "unchanged"
+  ) {
+    throw new Error(`Destination changed since review: ${toPath}`);
+  }
   const existingSource = resolvedExistingPath(fromPath);
   const existingDestination = resolvedExistingPath(toPath);
   if (
@@ -263,15 +369,54 @@ export function mirrorSyncPath(
   }
 
   if (!source) {
+    if (
+      compareSyncPathSnapshots(source, snapshotSyncPath(fromPath)) !==
+      "unchanged"
+    ) {
+      throw new Error(`Source changed while syncing: ${fromPath}`);
+    }
+    if (
+      compareSyncPathSnapshots(destination, snapshotSyncPath(toPath)) !==
+      "unchanged"
+    ) {
+      throw new Error(`Destination changed while syncing: ${toPath}`);
+    }
     if (toBasePath) assertSafeSyncPath(toBasePath, toPath);
     removePath(toPath);
     return;
   }
 
-  mkdirSync(dirname(toPath), { recursive: true });
+  const sourceDirectoryLinkTarget = windowsDirectoryLinkTarget(fromPath);
+  const destinationDirectoryLinkTarget =
+    source.kind === "directory" && destination?.kind === "directory"
+      ? windowsDirectoryLinkTarget(toPath)
+      : null;
+  const copySourcePath = sourceDirectoryLinkTarget ?? fromPath;
+  const installPath = destinationDirectoryLinkTarget ?? toPath;
+  const canonicalCopySource = resolvedPathWithExistingAncestor(copySourcePath);
+  const canonicalInstallPath = resolvedPathWithExistingAncestor(installPath);
+
+  if (sourceDirectoryLinkTarget) {
+    assertDirectoryLinkTargetDoesNotContainLink(fromPath, canonicalCopySource);
+  }
+  if (destinationDirectoryLinkTarget) {
+    assertDirectoryLinkTargetDoesNotContainLink(toPath, canonicalInstallPath);
+  }
+  if (source.kind === "directory") {
+    assertNoSelfContainingDirectoryLinks(copySourcePath);
+  }
+
+  if (
+    isSameOrDescendant(canonicalCopySource, canonicalInstallPath) ||
+    isSameOrDescendant(canonicalInstallPath, canonicalCopySource)
+  ) {
+    throw new Error("Refusing to mirror overlapping source and destination paths");
+  }
+
+  mkdirSync(dirname(installPath), { recursive: true });
   if (toBasePath) assertSafeSyncPath(toBasePath, toPath);
 
-  const temporaryPath = uniqueSiblingPath(toPath, "incoming");
+  const temporaryPath = uniqueSiblingPath(installPath, "incoming");
   let backupPath: string | null = null;
   let temporaryExists = false;
   let destinationMoved = false;
@@ -279,21 +424,77 @@ export function mirrorSyncPath(
 
   try {
     temporaryExists = true;
-    cpSync(fromPath, temporaryPath, {
+    cpSync(copySourcePath, temporaryPath, {
       recursive: source.kind === "directory",
       force: true,
       dereference: false,
       verbatimSymlinks: true,
     });
 
+    const copiedSource = snapshotSyncPath(temporaryPath);
+    const currentSource = snapshotSyncPath(fromPath);
+    const currentDestination = snapshotSyncPath(toPath);
+    if (
+      compareSyncPathSnapshots(source, copiedSource) !== "unchanged" ||
+      compareSyncPathSnapshots(source, currentSource) !== "unchanged"
+    ) {
+      throw new Error(`Source changed while syncing: ${fromPath}`);
+    }
+    if (
+      compareSyncPathSnapshots(destination, currentDestination) !== "unchanged"
+    ) {
+      throw new Error(`Destination changed while syncing: ${toPath}`);
+    }
+
+    const currentSourceDirectoryLinkTarget =
+      source.kind === "directory" && currentSource?.kind === "directory"
+        ? windowsDirectoryLinkTarget(fromPath)
+        : null;
+    const currentDestinationDirectoryLinkTarget =
+      source.kind === "directory" && currentDestination?.kind === "directory"
+        ? windowsDirectoryLinkTarget(toPath)
+        : null;
+    if (
+      (sourceDirectoryLinkTarget === null) !==
+        (currentSourceDirectoryLinkTarget === null) ||
+      (sourceDirectoryLinkTarget &&
+        currentSourceDirectoryLinkTarget &&
+        comparablePath(sourceDirectoryLinkTarget) !==
+          comparablePath(currentSourceDirectoryLinkTarget))
+    ) {
+      throw new Error(`Source directory link changed while syncing: ${fromPath}`);
+    }
+    if (
+      (destinationDirectoryLinkTarget === null) !==
+        (currentDestinationDirectoryLinkTarget === null) ||
+      (destinationDirectoryLinkTarget &&
+        currentDestinationDirectoryLinkTarget &&
+        comparablePath(destinationDirectoryLinkTarget) !==
+          comparablePath(currentDestinationDirectoryLinkTarget))
+    ) {
+      throw new Error(
+        `Destination directory link changed while syncing: ${toPath}`,
+      );
+    }
+
     if (toBasePath) assertSafeSyncPath(toBasePath, toPath);
-    if (pathExists(toPath)) {
-      backupPath = uniqueSiblingPath(toPath, "backup");
-      renameSync(toPath, backupPath);
+    if (destinationDirectoryLinkTarget) {
+      const currentTarget = windowsDirectoryLinkTarget(toPath);
+      if (
+        !currentTarget ||
+        comparablePath(currentTarget) !==
+          comparablePath(destinationDirectoryLinkTarget)
+      ) {
+        throw new Error(`Destination junction changed while syncing: ${toPath}`);
+      }
+    }
+    if (pathExists(installPath)) {
+      backupPath = uniqueSiblingPath(installPath, "backup");
+      renameSync(installPath, backupPath);
       destinationMoved = true;
     }
 
-    renameSync(temporaryPath, toPath);
+    renameSync(temporaryPath, installPath);
     temporaryExists = false;
     destinationInstalled = true;
 
@@ -312,12 +513,12 @@ export function mirrorSyncPath(
       !destinationInstalled
     ) {
       try {
-        if (pathExists(toPath)) {
+        if (pathExists(installPath)) {
           throw new Error(
-            `Cannot restore backup because the destination now exists: ${toPath}`,
+            `Cannot restore backup because the destination now exists: ${installPath}`,
           );
         }
-        renameSync(backupPath, toPath);
+        renameSync(backupPath, installPath);
       } catch (caughtRecoveryError) {
         recoveryError = caughtRecoveryError;
       }

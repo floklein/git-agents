@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readlinkSync,
   readdirSync,
   rmSync,
   symlinkSync,
@@ -99,6 +101,49 @@ describe("snapshotSyncPath", () => {
     expect(before.contentHash).not.toBe(after.contentHash);
     expect(compareSyncPathSnapshots(before, after)).toBe("modified");
   });
+
+  it.skipIf(process.platform === "win32")(
+    "detects executable permission changes",
+    () => {
+      const file = join(useTmp(), "review.sh");
+      writeFixture(file, "#!/bin/sh\n");
+      chmodSync(file, 0o644);
+      const before = requiredSnapshot(file);
+
+      chmodSync(file, 0o755);
+      const after = requiredSnapshot(file);
+
+      expect(before.contentHash).not.toBe(after.contentHash);
+      expect(compareSyncPathSnapshots(before, after)).toBe("modified");
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "normalizes executable permissions to the Git mode model",
+    () => {
+      const file = join(useTmp(), "review.sh");
+      writeFixture(file, "#!/bin/sh\n");
+      chmodSync(file, 0o700);
+      const ownerExecutable = requiredSnapshot(file);
+
+      chmodSync(file, 0o755);
+      const allExecutable = requiredSnapshot(file);
+      chmodSync(file, 0o655);
+      const groupAndOtherExecutable = requiredSnapshot(file);
+      chmodSync(file, 0o644);
+      const nonExecutable = requiredSnapshot(file);
+
+      expect(
+        compareSyncPathSnapshots(ownerExecutable, allExecutable),
+      ).toBe("unchanged");
+      expect(
+        compareSyncPathSnapshots(allExecutable, nonExecutable),
+      ).toBe("modified");
+      expect(
+        compareSyncPathSnapshots(groupAndOtherExecutable, nonExecutable),
+      ).toBe("unchanged");
+    },
+  );
 
   it("detects path and type changes", () => {
     const left = useTmp();
@@ -206,6 +251,244 @@ describe("mirrorSyncPath", () => {
     );
   });
 
+  it.skipIf(process.platform === "win32")(
+    "preserves executable permission bits",
+    () => {
+      const source = join(useTmp(), "commands");
+      const destination = join(useTmp(), "commands");
+      const sourceExecutable = join(source, "review.sh");
+      const sourceRegular = join(source, "instructions.md");
+      writeFixture(sourceExecutable, "#!/bin/sh\n");
+      writeFixture(sourceRegular, "Review carefully.\n");
+      chmodSync(sourceExecutable, 0o755);
+      chmodSync(sourceRegular, 0o644);
+
+      writeFixture(join(destination, "review.sh"), "stale");
+      chmodSync(join(destination, "review.sh"), 0o644);
+
+      mirrorSyncPath(source, destination);
+
+      expect(lstatSync(join(destination, "review.sh")).mode & 0o111).toBe(
+        0o111,
+      );
+      expect(lstatSync(join(destination, "instructions.md")).mode & 0o111).toBe(
+        0,
+      );
+      expect(
+        compareSyncPathSnapshots(
+          requiredSnapshot(source),
+          requiredSnapshot(destination),
+        ),
+      ).toBe("unchanged");
+    },
+  );
+
+  it.skipIf(process.platform !== "win32")(
+    "materializes a leaf directory junction source",
+    () => {
+      const root = useTmp();
+      const target = join(root, "junction-target");
+      const source = join(root, "source-junction");
+      const destination = join(useTmp(), "skills");
+      writeFixture(join(target, "direct.md"), "source direct");
+      writeFixture(join(target, "nested", "deep.md"), "source nested");
+      mkdirSync(join(target, "empty"), { recursive: true });
+      symlinkSync(target, source, "junction");
+      writeFixture(join(destination, "stale.md"), "stale");
+
+      expect(requiredSnapshot(source).kind).toBe("directory");
+
+      mirrorSyncPath(source, destination);
+
+      expect(lstatSync(source).isSymbolicLink()).toBe(true);
+      expect(lstatSync(destination).isDirectory()).toBe(true);
+      expect(lstatSync(destination).isSymbolicLink()).toBe(false);
+      expect(readFileSync(join(destination, "direct.md"), "utf8")).toBe(
+        "source direct",
+      );
+      expect(readFileSync(join(destination, "nested", "deep.md"), "utf8")).toBe(
+        "source nested",
+      );
+      expect(lstatSync(join(destination, "empty")).isDirectory()).toBe(true);
+      expect(existsSync(join(destination, "stale.md"))).toBe(false);
+      expect(
+        compareSyncPathSnapshots(
+          requiredSnapshot(source),
+          requiredSnapshot(destination),
+        ),
+      ).toBe("unchanged");
+    },
+  );
+
+  it.skipIf(process.platform !== "win32")(
+    "materializes nested directory junctions as portable content",
+    () => {
+      const root = useTmp();
+      const sourceBase = join(root, "source");
+      const destinationBase = join(root, "destination");
+      const source = join(sourceBase, "skills");
+      const shared = join(root, "shared-skill");
+      const nestedJunction = join(source, "shared");
+      const destination = join(destinationBase, "skills");
+      writeFixture(join(source, "direct.md"), "source direct");
+      writeFixture(join(shared, "SKILL.md"), "shared instructions");
+      symlinkSync(shared, nestedJunction, "junction");
+      mkdirSync(destinationBase, { recursive: true });
+
+      mirrorSyncPath(
+        source,
+        destination,
+        sourceBase,
+        destinationBase,
+      );
+
+      expect(lstatSync(nestedJunction).isSymbolicLink()).toBe(true);
+      expect(lstatSync(join(destination, "shared")).isDirectory()).toBe(true);
+      expect(lstatSync(join(destination, "shared")).isSymbolicLink()).toBe(
+        false,
+      );
+      expect(
+        readFileSync(join(destination, "shared", "SKILL.md"), "utf8"),
+      ).toBe("shared instructions");
+      expect(
+        compareSyncPathSnapshots(
+          requiredSnapshot(source),
+          requiredSnapshot(destination),
+        ),
+      ).toBe("unchanged");
+    },
+  );
+
+  it.skipIf(process.platform !== "win32")(
+    "mirrors into a leaf directory junction without replacing it",
+    () => {
+      const source = join(useTmp(), "skills");
+      const root = useTmp();
+      const target = join(root, "junction-target");
+      const destination = join(root, "destination-junction");
+      writeFixture(join(source, "direct.md"), "source direct");
+      writeFixture(join(source, "nested", "deep.md"), "source nested");
+      mkdirSync(join(source, "empty"), { recursive: true });
+      writeFixture(join(target, "direct.md"), "old direct");
+      writeFixture(join(target, "stale.md"), "stale direct");
+      writeFixture(join(target, "nested", "stale.md"), "stale nested");
+      symlinkSync(target, destination, "junction");
+      const junctionTarget = readlinkSync(destination);
+
+      mirrorSyncPath(source, destination);
+
+      expect(lstatSync(destination).isSymbolicLink()).toBe(true);
+      expect(readlinkSync(destination)).toBe(junctionTarget);
+      expect(readFileSync(join(target, "direct.md"), "utf8")).toBe(
+        "source direct",
+      );
+      expect(readFileSync(join(target, "nested", "deep.md"), "utf8")).toBe(
+        "source nested",
+      );
+      expect(lstatSync(join(target, "empty")).isDirectory()).toBe(true);
+      expect(existsSync(join(target, "stale.md"))).toBe(false);
+      expect(existsSync(join(target, "nested", "stale.md"))).toBe(false);
+      expect(
+        compareSyncPathSnapshots(
+          requiredSnapshot(source),
+          requiredSnapshot(destination),
+        ),
+      ).toBe("unchanged");
+    },
+  );
+
+  it.skipIf(process.platform !== "win32")(
+    "rejects a source junction whose target contains the junction",
+    () => {
+      const root = useTmp();
+      const sourceBase = join(root, "source");
+      const destinationBase = join(root, "destination");
+      const source = join(sourceBase, "skills");
+      const destination = join(destinationBase, "skills");
+      writeFixture(join(sourceBase, "keep.md"), "keep source");
+      mkdirSync(destinationBase, { recursive: true });
+      symlinkSync(sourceBase, source, "junction");
+
+      expect(() =>
+        mirrorSyncPath(
+          source,
+          destination,
+          sourceBase,
+          destinationBase,
+        )
+      ).toThrow("target contains the link");
+      expect(lstatSync(source).isSymbolicLink()).toBe(true);
+      expect(readFileSync(join(sourceBase, "keep.md"), "utf8")).toBe(
+        "keep source",
+      );
+      expect(existsSync(destination)).toBe(false);
+    },
+  );
+
+  it.skipIf(process.platform !== "win32")(
+    "rejects nested junctions whose targets contain them",
+    () => {
+      for (const rootIsJunction of [false, true]) {
+        const root = useTmp();
+        const sourceBase = join(root, "source");
+        const destinationBase = join(root, "destination");
+        const target = rootIsJunction
+          ? join(root, "target")
+          : join(sourceBase, "skills");
+        const source = join(sourceBase, "skills");
+        const destination = join(destinationBase, "skills");
+        writeFixture(join(target, "keep.md"), "keep source");
+        symlinkSync(target, join(target, "loop"), "junction");
+        mkdirSync(sourceBase, { recursive: true });
+        if (rootIsJunction) {
+          symlinkSync(target, source, "junction");
+        }
+        mkdirSync(destinationBase, { recursive: true });
+
+        expect(() =>
+          mirrorSyncPath(
+            source,
+            destination,
+            sourceBase,
+            destinationBase,
+          )
+        ).toThrow("target contains the link");
+        expect(readFileSync(join(target, "keep.md"), "utf8")).toBe(
+          "keep source",
+        );
+        expect(existsSync(destination)).toBe(false);
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "win32")(
+    "rejects a destination junction whose target contains the junction",
+    () => {
+      const root = useTmp();
+      const sourceBase = join(root, "source");
+      const destinationBase = join(root, "destination");
+      const source = join(sourceBase, "skills");
+      const destination = join(destinationBase, "skills");
+      writeFixture(join(source, "new.md"), "new content");
+      writeFixture(join(destinationBase, "keep.md"), "keep destination");
+      symlinkSync(destinationBase, destination, "junction");
+
+      expect(() =>
+        mirrorSyncPath(
+          source,
+          destination,
+          sourceBase,
+          destinationBase,
+        )
+      ).toThrow("target contains the link");
+      expect(lstatSync(destination).isSymbolicLink()).toBe(true);
+      expect(readFileSync(join(destinationBase, "keep.md"), "utf8")).toBe(
+        "keep destination",
+      );
+      expect(existsSync(join(destinationBase, "new.md"))).toBe(false);
+    },
+  );
+
   it("deletes the entire destination when the source is absent", () => {
     const root = useTmp();
     const missingFile = join(root, "missing-file");
@@ -238,6 +521,30 @@ describe("mirrorSyncPath", () => {
     );
     expect(lstatSync(join(directory, "empty")).isDirectory()).toBe(true);
     expect(requiredSnapshot(directory)).toEqual(before);
+  });
+
+  it("refuses to mirror a source that changed from its reviewed snapshot", () => {
+    const source = join(useTmp(), "AGENTS.md");
+    const destination = join(useTmp(), "AGENTS.md");
+    writeFixture(source, "reviewed source");
+    writeFixture(destination, "keep destination");
+    const reviewedSource = requiredSnapshot(source);
+    const reviewedDestination = requiredSnapshot(destination);
+    writeFileSync(source, "changed during execution", "utf8");
+
+    expect(() =>
+      mirrorSyncPath(
+        source,
+        destination,
+        undefined,
+        undefined,
+        {
+          source: reviewedSource,
+          destination: reviewedDestination,
+        },
+      )
+    ).toThrow("Source changed since review");
+    expect(readFileSync(destination, "utf8")).toBe("keep destination");
   });
 
   it("rejects a destination outside its declared base", () => {
@@ -288,7 +595,7 @@ describe("mirrorSyncPath", () => {
     );
   });
 
-  it("rejects a leaf alias instead of reporting a false success", () => {
+  it("handles a leaf alias without mutating its target", () => {
     const root = useTmp();
     const source = join(root, "source");
     const destination = join(root, "destination");
@@ -303,6 +610,16 @@ describe("mirrorSyncPath", () => {
       requiredSnapshot(source),
       requiredSnapshot(destination),
     );
+
+    if (process.platform === "win32") {
+      expect(before).toBe("unchanged");
+      expect(() => mirrorSyncPath(source, destination)).not.toThrow();
+      expect(readFileSync(join(source, "agent.md"), "utf8")).toBe(
+        "instructions",
+      );
+      return;
+    }
+
     expect(before).toBe("modified");
 
     expect(() => mirrorSyncPath(source, destination)).toThrow(
