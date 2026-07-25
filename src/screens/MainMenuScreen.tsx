@@ -10,12 +10,12 @@ type Props = {
 const MENU_ITEMS = [
   {
     name: "Pull",
-    description: "Download agents from remote to local",
+    description: "Download harness files to this machine",
     value: "pull",
   },
   {
     name: "Push",
-    description: "Upload local agents to remote",
+    description: "Upload harness files to the remote",
     value: "push",
   },
   {
@@ -41,7 +41,7 @@ export function MainMenuScreen({ onNavigate }: Props) {
     >
       <Box flexDirection="column" alignItems="center">
         <BigText text="git-agents" font="tiny" />
-        <Text>Sync your AI agent directories with a remote git repo</Text>
+        <Text>Sync portable AI harness files with a remote git repo</Text>
       </Box>
 
       <Box flexDirection="column" width={56} marginTop={2}>

@@ -1,64 +1,96 @@
 import { describe, expect, it } from "vitest";
 import { isAbsolute } from "path";
-import { AGENT_DEFS, BASE_SYNC_FOLDERS, getSyncFolders } from "../src/utils/agentDefs";
+import { AGENT_DEFS } from "../src/utils/agentDefs";
+
+const EXPECTED_MANIFESTS = [
+  {
+    id: "claude-code",
+    name: "Claude Code",
+    syncPaths: [
+      ".claude/CLAUDE.md",
+      ".claude/agents",
+      ".claude/rules",
+      ".claude/skills",
+      ".claude/commands",
+    ],
+  },
+  {
+    id: "codex",
+    name: "Codex",
+    syncPaths: [
+      ".codex/AGENTS.md",
+      ".codex/agents",
+      ".agents/skills",
+    ],
+  },
+  {
+    id: "cursor",
+    name: "Cursor",
+    syncPaths: [
+      ".cursor/agents",
+      ".cursor/rules",
+      ".cursor/skills",
+      ".cursor/commands",
+    ],
+  },
+  {
+    id: "gemini-cli",
+    name: "Gemini CLI",
+    syncPaths: [
+      ".gemini/GEMINI.md",
+      ".gemini/agents",
+      ".gemini/commands",
+      ".gemini/skills",
+    ],
+  },
+  {
+    id: "opencode",
+    name: "OpenCode",
+    syncPaths: [
+      ".config/opencode/AGENTS.md",
+      ".config/opencode/agents",
+      ".config/opencode/commands",
+      ".config/opencode/skills",
+    ],
+  },
+];
 
 describe("AGENT_DEFS", () => {
-  it("has at least one entry", () => {
-    expect(AGENT_DEFS.length).toBeGreaterThan(0);
+  it("contains exactly the five supported harness manifests", () => {
+    expect(AGENT_DEFS).toEqual(EXPECTED_MANIFESTS);
+    expect(AGENT_DEFS.map((def) => def.id)).toEqual([
+      "claude-code",
+      "codex",
+      "cursor",
+      "gemini-cli",
+      "opencode",
+    ]);
   });
 
-  it("all entries have non-empty id, name, and globalPath", () => {
+  it("uses unique harness ids and sync paths", () => {
+    const ids = AGENT_DEFS.map((def) => def.id);
+    const syncPaths = AGENT_DEFS.flatMap((def) => def.syncPaths);
+
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(new Set(syncPaths).size).toBe(syncPaths.length);
+  });
+
+  it("uses safe relative forward-slash sync paths", () => {
     for (const def of AGENT_DEFS) {
       expect(def.id.trim()).not.toBe("");
       expect(def.name.trim()).not.toBe("");
-      expect(def.globalPath.trim()).not.toBe("");
-    }
-  });
+      expect(def.syncPaths.length).toBeGreaterThan(0);
 
-  it("has no duplicate ids", () => {
-    const ids = AGENT_DEFS.map((d) => d.id);
-    const unique = new Set(ids);
-    expect(unique.size).toBe(ids.length);
-  });
+      for (const syncPath of def.syncPaths) {
+        const segments = syncPath.split("/");
 
-  it("all globalPath values are absolute paths", () => {
-    for (const def of AGENT_DEFS) {
-      expect(isAbsolute(def.globalPath)).toBe(true);
-    }
-  });
-
-  it("all custom syncFolders are non-empty arrays", () => {
-    for (const def of AGENT_DEFS) {
-      if (def.syncFolders) {
-        expect(def.syncFolders.length).toBeGreaterThan(0);
-        for (const f of def.syncFolders) {
-          expect(f.trim()).not.toBe("");
-        }
+        expect(syncPath.trim()).toBe(syncPath);
+        expect(syncPath).not.toContain("\\");
+        expect(isAbsolute(syncPath)).toBe(false);
+        expect(syncPath).not.toMatch(/^[A-Za-z]:\//);
+        expect(segments).not.toContain("");
+        expect(segments).not.toContain("..");
       }
     }
-  });
-});
-
-describe("BASE_SYNC_FOLDERS", () => {
-  it("is a non-empty array", () => {
-    expect(BASE_SYNC_FOLDERS.length).toBeGreaterThan(0);
-  });
-
-  it("contains common folder names", () => {
-    expect(BASE_SYNC_FOLDERS).toContain("skills");
-    expect(BASE_SYNC_FOLDERS).toContain("rules");
-    expect(BASE_SYNC_FOLDERS).toContain("commands");
-  });
-});
-
-describe("getSyncFolders", () => {
-  it("returns custom syncFolders when defined", () => {
-    const def = { id: "test", name: "Test", globalPath: "/test", syncFolders: ["skills"] };
-    expect(getSyncFolders(def)).toEqual(["skills"]);
-  });
-
-  it("returns BASE_SYNC_FOLDERS when syncFolders is undefined", () => {
-    const def = { id: "test", name: "Test", globalPath: "/test" };
-    expect(getSyncFolders(def)).toEqual(BASE_SYNC_FOLDERS);
   });
 });

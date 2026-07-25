@@ -209,7 +209,6 @@ export async function gitPull(
   if (result.ok) return result;
 
   const error = result.error ?? "";
-  // A newly created remote can be empty, which is a successful no-op for sync.
   if (
     error.includes("no such ref was fetched") ||
     error.includes("couldn't find remote ref")
@@ -222,27 +221,60 @@ export async function gitPull(
 export async function gitAddCommitPush(
   dir: string,
   message: string,
+  paths: string[],
   signal?: AbortSignal,
 ): Promise<ShellResult> {
-  const add = await runCommand("git", ["-C", dir, "add", "-A"], signal);
-  if (!add.ok) return add;
+  if (paths.length > 0) {
+    const add = await runCommand(
+      "git",
+      ["-C", dir, "add", "-A", "--", ...paths],
+      signal,
+    );
+    if (!add.ok) return add;
 
-  const stagedChanges = await runCommand(
-    "git",
-    ["-C", dir, "diff", "--cached", "--quiet", "--exit-code"],
-    signal,
-  );
-  if (stagedChanges.exitCode === 0) {
-    return { ok: true, output: "Nothing to commit" };
+    const status = await runCommand(
+      "git",
+      ["-C", dir, "status", "--porcelain", "--", ...paths],
+      signal,
+    );
+    if (!status.ok) return status;
+
+    if (status.output?.trim()) {
+      const commit = await runCommand(
+        "git",
+        ["-C", dir, "commit", "-m", message, "--", ...paths],
+        signal,
+      );
+      if (!commit.ok) return commit;
+    }
   }
-  if (stagedChanges.exitCode !== 1) return stagedChanges;
 
-  const commit = await runCommand(
+  const head = await runCommand(
     "git",
-    ["-C", dir, "commit", "-m", message],
+    ["-C", dir, "rev-parse", "--verify", "HEAD^{commit}"],
     signal,
   );
-  if (!commit.ok) return commit;
+  if (!head.ok) {
+    const symbolicHead = await runCommand(
+      "git",
+      ["-C", dir, "symbolic-ref", "-q", "HEAD"],
+      signal,
+    );
+    if (!symbolicHead.ok) return head;
+
+    const branchRef = symbolicHead.output?.trim();
+    if (!branchRef) return head;
+
+    const branch = await runCommand(
+      "git",
+      ["-C", dir, "show-ref", "--verify", "--quiet", branchRef],
+      signal,
+    );
+    if (branch.exitCode === 1) {
+      return { ok: true, output: "Nothing to commit" };
+    }
+    return branch.ok ? head : branch;
+  }
 
   return runCommand(
     "git",

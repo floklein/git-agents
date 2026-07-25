@@ -1,8 +1,14 @@
 import { Box } from "ink";
 import { render } from "ink-testing-library";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
 import { SyncScreen } from "../src/screens/SyncScreen";
+import { AGENT_DEFS } from "../src/utils/agentDefs";
+import type { AgentDiffEntry } from "../src/utils/flows";
+
+const syncState = vi.hoisted(() => ({
+  agentDiffs: [] as AgentDiffEntry[],
+}));
 
 vi.mock("../src/utils/flows", async (importOriginal) => {
   const actual =
@@ -11,10 +17,36 @@ vi.mock("../src/utils/flows", async (importOriginal) => {
     ...actual,
     runSyncLoad: vi.fn(async () => ({
       type: "ok",
-      agentDiffs: [],
+      agentDiffs: syncState.agentDiffs,
     })),
   };
 });
+
+afterEach(() => {
+  syncState.agentDiffs = [];
+});
+
+function populatedAgentDiffs(): AgentDiffEntry[] {
+  return AGENT_DEFS.map((def) => ({
+    def,
+    pathDiffs: def.syncPaths.map((path) => ({
+      path,
+      localBasePath: "C:\\local",
+      remoteBasePath: "C:\\remote",
+      localPath: `C:\\local\\${path}`,
+      remotePath: `C:\\remote\\${path}`,
+      status: "added",
+      local: {
+        kind: "file",
+        fileCount: 1,
+        contentHash: "local",
+      },
+      remote: null,
+    })),
+    remoteCount: 0,
+    localCount: def.syncPaths.length,
+  }));
+}
 
 describe("24-row layouts", () => {
   it("keeps the setup menu description and footer on separate rows", async () => {
@@ -52,6 +84,27 @@ describe("24-row layouts", () => {
       expect(frame).toContain("No changes to apply");
       expect(frame).toContain("Esc to cancel");
       expect(frame).not.toContain("No changes tEsc to cancel");
+    });
+    view.unmount();
+  });
+
+  it("keeps confirmation visible with all five harnesses populated", async () => {
+    syncState.agentDiffs = populatedAgentDiffs();
+    const view = render(
+      <Box height={24}>
+        <SyncScreen
+          mode="push"
+          signal={new AbortController().signal}
+          onBack={() => {}}
+        />
+      </Box>,
+    );
+
+    await vi.waitFor(() => {
+      const frame = view.lastFrame();
+      expect(frame).toContain("Confirm push?");
+      expect(frame).toContain("Apply changes");
+      expect(frame).toContain("Esc to cancel");
     });
     view.unmount();
   });

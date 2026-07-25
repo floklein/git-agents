@@ -5,7 +5,11 @@ import { SelectMenu } from "../components/SelectMenu";
 import { CONFIG_DIR } from "../utils/config";
 import { gitPull, gitAddCommitPush } from "../utils/shell";
 import { AGENT_DEFS } from "../utils/agentDefs";
-import { runSyncLoad, runSyncExecute, type AgentDiffEntry } from "../utils/flows";
+import {
+  runSyncLoad,
+  runSyncExecute,
+  type AgentDiffEntry,
+} from "../utils/flows";
 
 type Stage = "loading" | "review" | "executing" | "done";
 
@@ -30,8 +34,8 @@ export function SyncScreen({ mode, signal, onBack }: Props) {
 
   const shellDeps = {
     gitPull: (dir: string) => gitPull(dir, signal),
-    gitAddCommitPush: (dir: string, message: string) =>
-      gitAddCommitPush(dir, message, signal),
+    gitAddCommitPush: (dir: string, message: string, paths: string[]) =>
+      gitAddCommitPush(dir, message, paths, signal),
   };
 
   useEffect(() => {
@@ -48,7 +52,7 @@ export function SyncScreen({ mode, signal, onBack }: Props) {
         setStage("done");
         return;
       }
-      setStatus("Comparing agents...");
+      setStatus("Comparing files...");
       setAgentDiffs(result.agentDiffs);
       setStage("review");
     }
@@ -63,9 +67,7 @@ export function SyncScreen({ mode, signal, onBack }: Props) {
 
     setStage("executing");
     setStatus(
-      mode === "pull"
-        ? "Copying agents from remote..."
-        : "Copying agents to remote...",
+      mode === "pull" ? "Updating local files..." : "Updating remote files...",
     );
 
     const result = await runSyncExecute(
@@ -117,21 +119,15 @@ export function SyncScreen({ mode, signal, onBack }: Props) {
   }
 
   const totalRemote = agentDiffs.reduce(
-    (acc, entry) => acc + entry.remoteCount,
+    (total, entry) => total + entry.remoteCount,
     0,
   );
   const totalLocal = agentDiffs.reduce(
-    (acc, entry) => acc + entry.localCount,
+    (total, entry) => total + entry.localCount,
     0,
   );
-
   const hasChanges = agentDiffs.some((entry) =>
-    entry.folderDiffs.some(
-      (folderDiff) =>
-        folderDiff.diff.added.length > 0 ||
-        folderDiff.diff.removed.length > 0 ||
-        folderDiff.diff.modified.length > 0,
-    ),
+    entry.pathDiffs.some((pathDiff) => pathDiff.status !== "unchanged"),
   );
 
   return (
@@ -154,63 +150,53 @@ export function SyncScreen({ mode, signal, onBack }: Props) {
         <Text bold>Comparison</Text>
         <Box flexDirection="row" justifyContent="space-between">
           <Text>
-            Remote: <Text color="#8be9fd">{totalRemote} skills</Text>
+            Remote: <Text color="#8be9fd">{totalRemote} files</Text>
           </Text>
           <Text>
-            Local: <Text color="#8be9fd">{totalLocal} skills</Text>
+            Local: <Text color="#8be9fd">{totalLocal} files</Text>
           </Text>
         </Box>
 
-        {agentDiffs.length === 0 && <Text dimColor>No agents found</Text>}
+        {agentDiffs.length === 0 && (
+          <Text dimColor>No synced files found</Text>
+        )}
 
         {agentDiffs.map((entry) => (
           <Box
-            key={entry.defs.map((definition) => definition.id).join(",")}
+            key={entry.def.id}
             flexDirection="column"
             marginTop={1}
           >
             <Box flexDirection="row" justifyContent="space-between">
-              <Text color="#bd93f9">
-                {entry.defs.map((definition) => definition.name).join(", ")}
-              </Text>
+              <Text color="#bd93f9">{entry.def.name}</Text>
               <Text dimColor>
                 {entry.remoteCount}↓ / {entry.localCount}↑
               </Text>
             </Box>
-            {entry.folderDiffs.map((folderDiff) => {
-              const diff = folderDiff.diff;
-              const folderHasChanges =
-                diff.added.length > 0 ||
-                diff.removed.length > 0 ||
-                diff.modified.length > 0;
+            {entry.pathDiffs.map((pathDiff) => {
+              const marker = pathDiff.status === "added"
+                ? "+"
+                : pathDiff.status === "removed"
+                  ? "-"
+                  : pathDiff.status === "modified"
+                    ? "~"
+                    : "=";
+              const color = pathDiff.status === "added"
+                ? "#50fa7b"
+                : pathDiff.status === "removed"
+                  ? "#ff5555"
+                  : pathDiff.status === "modified"
+                    ? "#ffb86c"
+                    : undefined;
+
               return (
-                <Box key={folderDiff.folder} flexDirection="column">
-                  <Text dimColor>  {folderDiff.folder}/</Text>
-                  {diff.added.map((entry) => (
-                    <Text key={entry.name}>
-                      <Text color="#50fa7b">    + </Text>
-                      {entry.name}
-                    </Text>
-                  ))}
-                  {diff.removed.map((entry) => (
-                    <Text key={entry.name}>
-                      <Text color="#ff5555">    - </Text>
-                      {entry.name}
-                    </Text>
-                  ))}
-                  {diff.modified.map((entry) => (
-                    <Text key={entry.name}>
-                      <Text color="#ffb86c">    ~ </Text>
-                      {entry.name}
-                    </Text>
-                  ))}
-                  {!folderHasChanges && diff.unchanged.length > 0 && (
-                    <Text dimColor>
-                      {"    "}
-                      {diff.unchanged.length} unchanged
-                    </Text>
-                  )}
-                </Box>
+                <Text
+                  key={pathDiff.path}
+                  dimColor={pathDiff.status === "unchanged"}
+                >
+                  <Text color={color}>  {marker} </Text>
+                  {pathDiff.path}
+                </Text>
               );
             })}
           </Box>
@@ -225,7 +211,7 @@ export function SyncScreen({ mode, signal, onBack }: Props) {
       >
         <Text>
           Confirm {mode}?{" "}
-          <Text dimColor>(No is default, press Enter to cancel)</Text>
+          <Text dimColor>(No is default. Press Enter to cancel)</Text>
         </Text>
         <Box flexDirection="column" width={46}>
           <SelectMenu

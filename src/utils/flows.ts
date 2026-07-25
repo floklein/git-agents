@@ -1,24 +1,18 @@
-import { join } from "path";
-import { existsSync, readdirSync } from "fs";
-import { getSyncDirForAgent } from "./config";
-import { diffAgentsFromLists, copyAgentsDir, listAgents, matchesAllowlist } from "./agents";
-import { getSyncFolders, type AgentDef } from "./agentDefs";
-import type { Config, FolderDiff, RemoteType, ShellResult } from "../types";
-
-function collectMatchingFolders(globalPath: string, syncDir: string, patterns: string[]): string[] {
-  const names = new Set<string>();
-  for (const dir of [globalPath, syncDir]) {
-    if (!existsSync(dir)) continue;
-    try {
-      for (const d of readdirSync(dir, { withFileTypes: true })) {
-        if (d.isDirectory() && matchesAllowlist(d.name, patterns)) {
-          names.add(d.name);
-        }
-      }
-    } catch {}
-  }
-  return [...names].sort();
-}
+import { homedir } from "os";
+import { getLocalSyncPath, getRemoteSyncPath } from "./config";
+import {
+  compareSyncPathSnapshots,
+  mirrorSyncPath,
+  snapshotSyncPath,
+} from "./agents";
+import type { AgentDef } from "./agentDefs";
+import type {
+  Config,
+  RemoteType,
+  ShellResult,
+  SyncPathSnapshot,
+  SyncPathStatus,
+} from "../types";
 
 export type FlowDeps = {
   checkGhInstalled: () => Promise<ShellResult>;
@@ -31,7 +25,11 @@ export type FlowDeps = {
   isAlreadyCloned: () => boolean;
   writeConfig: (config: Config) => void;
   gitPull: (dir: string) => Promise<ShellResult>;
-  gitAddCommitPush: (dir: string, message: string) => Promise<ShellResult>;
+  gitAddCommitPush: (
+    dir: string,
+    message: string,
+    paths: string[],
+  ) => Promise<ShellResult>;
   gitSetRemoteUrl: (dir: string, url: string) => Promise<ShellResult>;
 };
 
@@ -137,60 +135,98 @@ export async function runGitUrlValidation(
 }
 
 export type AgentDiffEntry = {
-  defs: AgentDef[];
-  folderDiffs: FolderDiff[];
+  def: AgentDef;
+  pathDiffs: SyncPathDiff[];
   remoteCount: number;
   localCount: number;
+};
+
+export type SyncPathDiff = {
+  path: string;
+  localBasePath: string;
+  remoteBasePath: string;
+  localPath: string;
+  remotePath: string;
+  status: SyncPathStatus;
+  local: SyncPathSnapshot | null;
+  remote: SyncPathSnapshot | null;
 };
 
 export type SyncLoadResult =
   | { type: "ok"; agentDiffs: AgentDiffEntry[] }
   | { type: "error"; message: string };
 
+function syncRoot(path: string): string {
+  return path.split("/")[0]!;
+}
+
 export async function runSyncLoad(
   mode: "pull" | "push",
   agentDefs: AgentDef[],
   configDir: string,
-  deps: Pick<FlowDeps, "gitPull">
+  deps: Pick<FlowDeps, "gitPull">,
+  homeDir: string = homedir(),
 ): Promise<SyncLoadResult> {
   const pullResult = await deps.gitPull(configDir);
   if (!pullResult.ok) {
     return { type: "error", message: `Failed to pull remote: ${pullResult.error ?? "unknown error"}` };
   }
 
-  const seen = new Map<string, AgentDef[]>();
-  for (const def of agentDefs) {
-    const existing = seen.get(def.globalPath) ?? [];
-    seen.set(def.globalPath, [...existing, def]);
-  }
-
   const entries: AgentDiffEntry[] = [];
-  for (const [globalPath, defs] of seen) {
-    const syncDir = getSyncDirForAgent(globalPath);
-    const folders = getSyncFolders(defs[0]!);
+  try {
+    for (const def of agentDefs) {
+      const pathDiffs = def.syncPaths.map((path): SyncPathDiff => {
+        const localPath = getLocalSyncPath(path, homeDir);
+        const remotePath = getRemoteSyncPath(path, configDir);
+        const local = snapshotSyncPath(localPath);
+        const remote = snapshotSyncPath(remotePath);
+        const source = mode === "pull" ? remote : local;
+        const destination = mode === "pull" ? local : remote;
+        return {
+          path,
+          localBasePath: homeDir,
+          remoteBasePath: configDir,
+          localPath,
+          remotePath,
+          status: compareSyncPathSnapshots(source, destination),
+          local,
+          remote,
+        };
+      });
 
-    const folderDiffs: FolderDiff[] = [];
-    let remoteTotal = 0;
-    let localTotal = 0;
+      const sourceRoots = new Set(
+        pathDiffs
+          .filter((diff) =>
+            mode === "pull" ? diff.remote !== null : diff.local !== null
+          )
+          .map((diff) => syncRoot(diff.path)),
+      );
+      const existingPathDiffs = pathDiffs.filter((diff) => {
+        const source = mode === "pull" ? diff.remote : diff.local;
+        const destination = mode === "pull" ? diff.local : diff.remote;
+        return source !== null ||
+          (destination !== null && sourceRoots.has(syncRoot(diff.path)));
+      });
+      if (existingPathDiffs.length === 0) continue;
 
-    for (const folder of collectMatchingFolders(globalPath, syncDir, folders)) {
-      const srcFolder = join(mode === "pull" ? syncDir : globalPath, folder);
-      const dstFolder = join(mode === "pull" ? globalPath : syncDir, folder);
-      const srcList = listAgents(srcFolder);
-      const dstList = listAgents(dstFolder);
-      if (srcList.length === 0 && dstList.length === 0) continue;
-      remoteTotal += mode === "pull" ? srcList.length : dstList.length;
-      localTotal += mode === "pull" ? dstList.length : srcList.length;
-      folderDiffs.push({ folder, diff: diffAgentsFromLists(srcList, dstList) });
+      entries.push({
+        def,
+        pathDiffs: existingPathDiffs,
+        remoteCount: existingPathDiffs.reduce(
+          (total, diff) => total + (diff.remote?.fileCount ?? 0),
+          0,
+        ),
+        localCount: existingPathDiffs.reduce(
+          (total, diff) => total + (diff.local?.fileCount ?? 0),
+          0,
+        ),
+      });
     }
-
-    if (folderDiffs.length === 0) continue;
-    entries.push({
-      defs,
-      folderDiffs,
-      remoteCount: remoteTotal,
-      localCount: localTotal,
-    });
+  } catch (error: any) {
+    return {
+      type: "error",
+      message: `Failed to compare synced paths: ${error.message}`,
+    };
   }
 
   return { type: "ok", agentDiffs: entries };
@@ -209,24 +245,47 @@ export async function runSyncExecute(
   const copied = new Set<string>();
   try {
     for (const entry of agentDiffs) {
-      const globalPath = entry.defs[0]!.globalPath;
-      if (copied.has(globalPath)) continue;
-      copied.add(globalPath);
-      const syncDir = getSyncDirForAgent(globalPath);
-      for (const fd of entry.folderDiffs) {
-        const srcFolder = join(mode === "pull" ? syncDir : globalPath, fd.folder);
-        const dstFolder = join(mode === "pull" ? globalPath : syncDir, fd.folder);
-        copyAgentsDir(srcFolder, dstFolder);
+      for (const pathDiff of entry.pathDiffs) {
+        if (pathDiff.status === "unchanged") continue;
+        const sourcePath = mode === "pull"
+          ? pathDiff.remotePath
+          : pathDiff.localPath;
+        const sourceBasePath = mode === "pull"
+          ? pathDiff.remoteBasePath
+          : pathDiff.localBasePath;
+        const destinationPath = mode === "pull"
+          ? pathDiff.localPath
+          : pathDiff.remotePath;
+        const destinationBasePath = mode === "pull"
+          ? pathDiff.localBasePath
+          : pathDiff.remoteBasePath;
+        const copyKey = `${sourcePath}\0${destinationPath}`;
+        if (copied.has(copyKey)) continue;
+        copied.add(copyKey);
+        mirrorSyncPath(
+          sourcePath,
+          destinationPath,
+          sourceBasePath,
+          destinationBasePath,
+        );
       }
     }
   } catch (e: any) {
-    return { type: "error", message: `Failed to copy agents: ${e.message}` };
+    return { type: "error", message: `Failed to sync paths: ${e.message}` };
   }
 
   if (mode === "push") {
+    const managedPaths = [
+      ...new Set(
+        agentDiffs.flatMap((entry) =>
+          entry.pathDiffs.map((pathDiff) => pathDiff.path)
+        ),
+      ),
+    ];
     const pushResult = await deps.gitAddCommitPush(
       configDir,
-      `sync: update agents from local (${new Date().toISOString().slice(0, 10)})`
+      `sync: update harness files from local (${new Date().toISOString().slice(0, 10)})`,
+      managedPaths,
     );
     if (!pushResult.ok) {
       return { type: "error", message: `Failed to push: ${pushResult.error ?? "unknown error"}` };
@@ -235,6 +294,8 @@ export async function runSyncExecute(
 
   return {
     type: "ok",
-    message: mode === "pull" ? "Pull complete! Local agents updated." : "Push complete! Remote updated.",
+    message: mode === "pull"
+      ? "Pull complete! Local files updated."
+      : "Push complete! Remote files updated.",
   };
 }
