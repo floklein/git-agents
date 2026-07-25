@@ -20,7 +20,7 @@
     "url": "git+https://github.com/floklein/git-agents.git"
   },
   "engines": {
-    "bun": ">=1.0.0"
+    "node": ">=22"
   },
   "bin": {
     "ga": "dist/index.js",
@@ -31,20 +31,29 @@
     "README.md"
   ],
   "scripts": {
-    "dev": "bun run --watch src/index.tsx",
-    "start": "bun src/index.tsx",
-    "build": "bun scripts/build.ts",
-    "prepublishOnly": "bun run build",
-    "test": "bun test"
+    "dev": "tsx watch src/index.tsx",
+    "start": "tsx src/index.tsx",
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm test && npm run build",
+    "prepack": "npm run build"
   },
   "dependencies": {
-    "@opentui/core": "^0.1.95",
-    "@opentui/react": "^0.1.95",
+    "ink": "^7.1.1",
+    "ink-big-text": "^2.0.0",
+    "ink-text-input": "^6.0.0",
     "react": "^19.2.4",
     "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@types/bun": "latest",
-    "typescript": "^5"
+    "@types/ink-big-text": "^1.2.4",
+    "@types/node": "^22.20.1",
+    "@types/react": "^19.2.0",
+    "esbuild": "^0.28.1",
+    "ink-testing-library": "^4.0.0",
+    "tsx": "^4.23.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
   }
 }

@@ -1,5 +1,4 @@
-import { createCliRenderer } from "@opentui/core";
-import { createRoot } from "@opentui/react";
+import { render } from "ink";
 import { readConfig } from "./utils/config";
 import { App } from "./App";
 import type { Screen } from "./types";
@@ -18,7 +17,9 @@ const initialScreen: Screen =
     ? { id: "sync", mode: "push" }
     : { id: "main" };
 
-const renderer = await createCliRenderer({ exitOnCtrlC: false });
-createRoot(renderer).render(
-  <App initialScreen={initialScreen} initialConfig={config ?? undefined} />
+const app = render(
+  <App initialScreen={initialScreen} initialConfig={config ?? undefined} />,
+  { alternateScreen: true, exitOnCtrlC: false },
 );
+
+await app.waitUntilExit();

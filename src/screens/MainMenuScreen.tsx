@@ -1,44 +1,67 @@
-import { useKeyboard } from "@opentui/react";
+import { Box, Text, useApp, useInput } from "ink";
+import BigText from "ink-big-text";
+import { SelectMenu } from "../components/SelectMenu";
 import type { Screen } from "../types";
 
 type Props = {
   onNavigate: (screen: Screen) => void;
 };
 
+const MENU_ITEMS = [
+  {
+    name: "Pull",
+    description: "Download agents from remote to local",
+    value: "pull",
+  },
+  {
+    name: "Push",
+    description: "Upload local agents to remote",
+    value: "push",
+  },
+  {
+    name: "Edit Config",
+    description: "Change remote configuration",
+    value: "setup",
+  },
+] as const;
+
 export function MainMenuScreen({ onNavigate }: Props) {
-  useKeyboard((key) => {
-    if (key.name === "escape") {
-      process.exit(0);
-    }
+  const { exit } = useApp();
+
+  useInput((_input, key) => {
+    if (key.escape) exit();
   });
 
   return (
-    <box flexDirection="column" alignItems="center" justifyContent="center" flexGrow={1}>
-      <box flexDirection="column" alignItems="center" gap={1}>
-        <ascii-font font="tiny" text="git-agents" />
-        <text>Sync your Claude agents directory with a remote git repo</text>
-      </box>
+    <Box
+      flexDirection="column"
+      alignItems="center"
+      justifyContent="center"
+      flexGrow={1}
+    >
+      <Box flexDirection="column" alignItems="center">
+        <BigText text="git-agents" font="tiny" />
+        <Text>Sync your AI agent directories with a remote git repo</Text>
+      </Box>
 
-      <box flexDirection="column" width={40} marginTop={2}>
-        <select
-          focused={true}
-          options={[
-            { name: "Pull", description: "Download agents from remote to local" },
-            { name: "Push", description: "Upload local agents to remote" },
-            { name: "Edit Config", description: "Change remote configuration" },
-          ]}
-          onSelect={(index) => {
-            if (index === 0) onNavigate({ id: "sync", mode: "pull" });
-            else if (index === 1) onNavigate({ id: "sync", mode: "push" });
-            else if (index === 2) onNavigate({ id: "setup" });
+      <Box flexDirection="column" width={56} marginTop={2}>
+        <SelectMenu
+          options={MENU_ITEMS}
+          onSelect={(item) => {
+            if (item.value === "pull") {
+              onNavigate({ id: "sync", mode: "pull" });
+            } else if (item.value === "push") {
+              onNavigate({ id: "sync", mode: "push" });
+            } else {
+              onNavigate({ id: "setup" });
+            }
           }}
-          height={6}
         />
-      </box>
+      </Box>
 
-      <box marginTop={1}>
-        <text>↑↓ navigate  Enter select  Ctrl+C quit</text>
-      </box>
-    </box>
+      <Box marginTop={1}>
+        <Text dimColor>↑↓ navigate  Enter select  Esc or Ctrl+C quit</Text>
+      </Box>
+    </Box>
   );
 }

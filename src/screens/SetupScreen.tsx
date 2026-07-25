@@ -1,6 +1,11 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { useState } from "react";
-import { useKeyboard } from "@opentui/react";
-import { TextAttributes } from "@opentui/core";
+import { Box, Text, useInput } from "ink";
+import BigText from "ink-big-text";
+import TextInput from "ink-text-input";
+import { SelectMenu } from "../components/SelectMenu";
 import {
   checkGhInstalled,
   checkGhAuth,
@@ -19,8 +24,6 @@ import {
   runClone,
   runGitUrlValidation,
 } from "../utils/flows";
-import { existsSync } from "fs";
-import { join } from "path";
 import type { Config, RemoteType } from "../types";
 
 type SetupStep =
@@ -37,15 +40,36 @@ type SetupStep =
 
 type Props = {
   existingConfig?: Config;
+  signal: AbortSignal;
   onComplete: (config: Config) => void;
 };
 
 const GH_REPO_NAME = "git-agents-remote";
+const MAX_GIT_URL_LENGTH = 1000;
 
-export function SetupScreen({ existingConfig, onComplete }: Props) {
+function sanitizeGitUrl(value: string): string {
+  return stripVTControlCharacters(value)
+    .replace(/[\r\n]/g, "")
+    .slice(0, MAX_GIT_URL_LENGTH);
+}
+
+const REMOTE_ITEMS = [
+  {
+    name: "GitHub CLI (gh)",
+    description: "Auto-create and manage a private GitHub repo",
+    value: "gh",
+  },
+  {
+    name: "Custom Git Repo",
+    description: "Use any existing remote git repository",
+    value: "git",
+  },
+] as const;
+
+export function SetupScreen({ existingConfig, signal, onComplete }: Props) {
   const [step, setStep] = useState<SetupStep>("welcome");
   const [selectedRemote, setSelectedRemote] = useState<RemoteType>(
-    existingConfig?.remote ?? "gh"
+    existingConfig?.remote ?? "gh",
   );
   const [gitUrl, setGitUrl] = useState(existingConfig?.repoUrl ?? "");
   const [repoCloneUrl, setRepoCloneUrl] = useState("");
@@ -53,20 +77,20 @@ export function SetupScreen({ existingConfig, onComplete }: Props) {
   const [errorMsg, setErrorMsg] = useState("");
   const [statusMsg, setStatusMsg] = useState("");
 
-  useKeyboard((key) => {
-    if (step === "welcome" && key.name === "return") {
+  useInput((_input, key) => {
+    if (step === "welcome" && key.return) {
       setStep("choose-remote");
     }
 
-    if (step === "gh-auth-needed" && key.name === "return") {
-      recheckGhAuth();
+    if (step === "gh-auth-needed" && key.return) {
+      void recheckGhAuth();
     }
 
-    if (step === "error" && key.name === "return") {
+    if (step === "error" && key.return) {
       setStep("choose-remote");
     }
 
-    if (step === "git-url-input" && key.name === "escape") {
+    if (step === "git-url-input" && key.escape) {
       setStep("choose-remote");
     }
   });
@@ -74,25 +98,26 @@ export function SetupScreen({ existingConfig, onComplete }: Props) {
   async function recheckGhAuth() {
     setStep("gh-checking");
     setStatusMsg("Checking gh auth...");
-    const auth = await checkGhAuth();
+    const auth = await checkGhAuth(signal);
     if (!auth.ok) {
       setStep("gh-auth-needed");
       return;
     }
-    proceedGhRepoCheck();
+    void proceedGhRepoCheck();
   }
 
   const shellDeps = {
-    checkGhInstalled,
-    checkGhAuth,
-    ghRepoExists,
-    ghCreateRepo,
-    ghGetRepoCloneUrl,
-    checkGitRepoExists,
-    cloneRepo: (url: string) => cloneRepo(url, CONFIG_DIR),
+    checkGhInstalled: () => checkGhInstalled(signal),
+    checkGhAuth: () => checkGhAuth(signal),
+    ghRepoExists: (name: string) => ghRepoExists(name, signal),
+    ghCreateRepo: (name: string) => ghCreateRepo(name, signal),
+    ghGetRepoCloneUrl: (name: string) => ghGetRepoCloneUrl(name, signal),
+    checkGitRepoExists: (url: string) => checkGitRepoExists(url, signal),
+    cloneRepo: (url: string) => cloneRepo(url, CONFIG_DIR, signal),
     isAlreadyCloned: () => existsSync(join(CONFIG_DIR, ".git")),
     writeConfig,
-    gitSetRemoteUrl,
+    gitSetRemoteUrl: (dir: string, url: string) =>
+      gitSetRemoteUrl(dir, url, signal),
   };
 
   async function startGhFlow() {
@@ -100,7 +125,9 @@ export function SetupScreen({ existingConfig, onComplete }: Props) {
     setStatusMsg("Checking gh CLI...");
     const result = await runGhPrecheck(shellDeps);
     if (result.type === "gh-not-installed") {
-      setErrorMsg("GitHub CLI (gh) is not installed. Install it from https://cli.github.com and try again.");
+      setErrorMsg(
+        "GitHub CLI (gh) is not installed. Install it from https://cli.github.com and try again.",
+      );
       setStep("error");
       return;
     }
@@ -108,7 +135,7 @@ export function SetupScreen({ existingConfig, onComplete }: Props) {
       setStep("gh-auth-needed");
       return;
     }
-    proceedGhRepoCheck();
+    void proceedGhRepoCheck();
   }
 
   async function proceedGhRepoCheck() {
@@ -160,198 +187,271 @@ export function SetupScreen({ existingConfig, onComplete }: Props) {
     setStatusMsg("Validating repository...");
     const result = await runGitUrlValidation(url, shellDeps);
     if (result.type === "error") {
-      setErrorMsg(`${result.message}\nMake sure the URL is correct and you have access.`);
+      setErrorMsg(
+        `${result.message}\nMake sure the URL is correct and you have access.`,
+      );
       setStep("error");
       return;
     }
     await startClone(url, "git");
   }
 
-  // ---- Render ----
-
   if (step === "welcome") {
     return (
-      <box flexDirection="column" alignItems="center" justifyContent="center" flexGrow={1} gap={2}>
-        <ascii-font font="tiny" text="git-agents" />
-        <box flexDirection="column" alignItems="center" gap={1} width={60}>
-          <text>Sync your Claude agents skills with a remote git repo.</text>
-          <text attributes={TextAttributes.DIM}>
+      <Box
+        flexDirection="column"
+        alignItems="center"
+        justifyContent="center"
+        flexGrow={1}
+      >
+        <BigText text="git-agents" font="tiny" />
+        <Box flexDirection="column" alignItems="center" width={60} marginTop={1}>
+          <Text>Sync your AI agent skills with a remote git repo.</Text>
+          <Text dimColor>
             Keeps your AI agents in sync across machines using git.
-          </text>
-        </box>
-        <text>
-          <span attributes={TextAttributes.DIM}>Press </span>
-          <span>Enter</span>
-          <span attributes={TextAttributes.DIM}> to start setup</span>
-        </text>
-      </box>
+          </Text>
+        </Box>
+        <Box marginTop={2}>
+          <Text dimColor>Press </Text>
+          <Text>Enter</Text>
+          <Text dimColor> to start setup</Text>
+        </Box>
+      </Box>
     );
   }
 
   if (step === "choose-remote") {
     return (
-      <box flexDirection="column" alignItems="center" justifyContent="center" flexGrow={1} gap={2}>
-        <text>Choose how to connect your remote:</text>
-        <select
-          focused={true}
-          options={[
-            {
-              name: "GitHub CLI (gh)",
-              description: "Auto-create and manage a private GitHub repo",
-            },
-            {
-              name: "Custom Git Repo",
-              description: "Use any existing remote git repository",
-            },
-          ]}
-          selectedIndex={selectedRemote === "gh" ? 0 : 1}
-          onSelect={(index) => {
-            const remote: RemoteType = index === 0 ? "gh" : "git";
-            setSelectedRemote(remote);
-            if (remote === "gh") {
-              startGhFlow();
-            } else {
-              setStep("git-url-input");
-            }
-          }}
-          width={50}
-          height={4}
-        />
-        <text attributes={TextAttributes.DIM}>↑↓ navigate  Enter select</text>
-      </box>
+      <Box
+        flexDirection="column"
+        alignItems="center"
+        justifyContent="center"
+        flexGrow={1}
+      >
+        <Text>Choose how to connect your remote:</Text>
+        <Box
+          flexDirection="column"
+          width={68}
+          marginTop={1}
+          flexShrink={0}
+        >
+          <SelectMenu
+            key="choose-remote"
+            options={REMOTE_ITEMS}
+            initialIndex={selectedRemote === "gh" ? 0 : 1}
+            onSelect={(item) => {
+              const remote: RemoteType = item.value;
+              setSelectedRemote(remote);
+              if (remote === "gh") {
+                void startGhFlow();
+              } else {
+                setStep("git-url-input");
+              }
+            }}
+          />
+        </Box>
+        <Box flexShrink={0}>
+          <Text dimColor>↑↓ navigate  Enter select</Text>
+        </Box>
+      </Box>
     );
   }
 
   if (step === "gh-checking") {
     return (
-      <box flexDirection="column" alignItems="center" justifyContent="center" flexGrow={1}>
-        <text>{statusMsg}</text>
-      </box>
+      <Box
+        flexDirection="column"
+        alignItems="center"
+        justifyContent="center"
+        flexGrow={1}
+      >
+        <Text>{statusMsg}</Text>
+      </Box>
     );
   }
 
   if (step === "gh-auth-needed") {
     return (
-      <box flexDirection="column" alignItems="center" justifyContent="center" flexGrow={1} gap={2}>
-        <text fg="#ffb86c">Not authenticated with GitHub CLI.</text>
-        <box border={true} borderStyle="rounded" paddingX={2} paddingY={1}>
-          <text>
-            <span attributes={TextAttributes.DIM}>Run in another terminal: </span>
-            <span fg="#50fa7b">gh auth login</span>
-          </text>
-        </box>
-        <text>
-          <span attributes={TextAttributes.DIM}>Press </span>
-          <span>Enter</span>
-          <span attributes={TextAttributes.DIM}> once authenticated to continue</span>
-        </text>
-      </box>
+      <Box
+        flexDirection="column"
+        alignItems="center"
+        justifyContent="center"
+        flexGrow={1}
+      >
+        <Text color="#ffb86c">Not authenticated with GitHub CLI.</Text>
+        <Box
+          borderStyle="round"
+          paddingX={2}
+          paddingY={1}
+          marginTop={1}
+        >
+          <Text dimColor>Run in another terminal: </Text>
+          <Text color="#50fa7b">gh auth login</Text>
+        </Box>
+        <Box marginTop={1}>
+          <Text dimColor>Press </Text>
+          <Text>Enter</Text>
+          <Text dimColor> once authenticated to continue</Text>
+        </Box>
+      </Box>
     );
   }
 
   if (step === "gh-repo-check") {
     return (
-      <box flexDirection="column" alignItems="center" justifyContent="center" flexGrow={1} gap={2}>
-        <text>
-          Repo <span fg="#8be9fd">"{GH_REPO_NAME}"</span> does not exist on your GitHub account.
-        </text>
-        <select
-          focused={true}
-          options={[
-            { name: `Create private repo "${GH_REPO_NAME}"`, description: "Recommended" },
-            { name: "Cancel", description: "Go back to remote selection" },
-          ]}
-          onSelect={(index) => {
-            if (index === 0) createGhRepoAndContinue();
-            else setStep("choose-remote");
-          }}
-          width={50}
-          height={4}
-        />
-      </box>
+      <Box
+        flexDirection="column"
+        alignItems="center"
+        justifyContent="center"
+        flexGrow={1}
+      >
+        <Text>
+          Repo <Text color="#8be9fd">"{GH_REPO_NAME}"</Text> does not exist on
+          your GitHub account.
+        </Text>
+        <Box flexDirection="column" width={60} marginTop={1}>
+          <SelectMenu
+            key="gh-repo-check"
+            options={[
+              {
+                name: `Create private repo "${GH_REPO_NAME}"`,
+                description: "Recommended",
+                value: "create",
+              },
+              {
+                name: "Cancel",
+                description: "Go back to remote selection",
+                value: "cancel",
+              },
+            ] as const}
+            onSelect={(item) => {
+              if (item.value === "create") {
+                void createGhRepoAndContinue();
+              } else {
+                setStep("choose-remote");
+              }
+            }}
+          />
+        </Box>
+      </Box>
     );
   }
 
   if (step === "gh-confirm") {
     return (
-      <box flexDirection="column" alignItems="center" justifyContent="center" flexGrow={1} gap={2}>
-        <text fg="#50fa7b">
+      <Box
+        flexDirection="column"
+        alignItems="center"
+        justifyContent="center"
+        flexGrow={1}
+      >
+        <Text color="#50fa7b">
           {ghRepoExistedBefore ? "Found existing repo!" : "Repository ready!"}
-        </text>
-        <box border={true} borderStyle="rounded" paddingX={2} paddingY={1} flexDirection="column" gap={1}>
-          <text>
-            <span attributes={TextAttributes.DIM}>Repo: </span>
-            <span fg="#8be9fd">{repoCloneUrl}</span>
-          </text>
-          <text>
-            <span attributes={TextAttributes.DIM}>Will clone to: </span>
-            <span>~/.git-agents</span>
-          </text>
-        </box>
-        <select
-          focused={true}
-          options={[
-            { name: "Continue", description: "Clone repo and save config" },
-            { name: "Cancel", description: "Go back to remote selection" },
-          ]}
-          onSelect={(index) => {
-            if (index === 0) startClone(repoCloneUrl, "gh");
-            else setStep("choose-remote");
-          }}
-          width={40}
-          height={4}
-        />
-      </box>
+        </Text>
+        <Box
+          borderStyle="round"
+          paddingX={2}
+          paddingY={1}
+          flexDirection="column"
+          marginTop={1}
+        >
+          <Text>
+            <Text dimColor>Repo: </Text>
+            <Text color="#8be9fd">{repoCloneUrl}</Text>
+          </Text>
+          <Text>
+            <Text dimColor>Will clone to: </Text>
+            <Text>~/.git-agents</Text>
+          </Text>
+        </Box>
+        <Box flexDirection="column" width={52} marginTop={1}>
+          <SelectMenu
+            key="gh-confirm"
+            options={[
+              {
+                name: "Continue",
+                description: "Clone repo and save config",
+                value: "continue",
+              },
+              {
+                name: "Cancel",
+                description: "Go back to remote selection",
+                value: "cancel",
+              },
+            ] as const}
+            onSelect={(item) => {
+              if (item.value === "continue") {
+                void startClone(repoCloneUrl, "gh");
+              } else {
+                setStep("choose-remote");
+              }
+            }}
+          />
+        </Box>
+      </Box>
     );
   }
 
   if (step === "git-url-input") {
     return (
-      <box flexDirection="column" alignItems="center" justifyContent="center" flexGrow={1} gap={2}>
-        <text>Enter the Git repository URL:</text>
-        <box border={true} borderStyle="rounded" paddingX={2} paddingY={1} width={60}>
-          <input
-            focused={true}
+      <Box
+        flexDirection="column"
+        alignItems="center"
+        justifyContent="center"
+        flexGrow={1}
+      >
+        <Text>Enter the Git repository URL:</Text>
+        <Box
+          borderStyle="round"
+          paddingX={2}
+          paddingY={1}
+          width={60}
+          marginTop={1}
+        >
+          <TextInput
+            focus
             placeholder="git@github.com:user/repo.git"
             value={gitUrl}
-            onInput={setGitUrl}
-            onSubmit={() => {
-              if (gitUrl.trim()) validateGitUrl(gitUrl.trim());
+            onChange={(value) => setGitUrl(sanitizeGitUrl(value))}
+            onSubmit={(value) => {
+              const url = sanitizeGitUrl(value).trim();
+              if (url) void validateGitUrl(url);
             }}
-            flexGrow={1}
           />
-        </box>
-        <text attributes={TextAttributes.DIM}>Enter to confirm  Esc to go back</text>
-      </box>
+        </Box>
+        <Text dimColor>Enter to confirm  Esc to go back</Text>
+      </Box>
     );
   }
 
-  if (step === "git-url-checking") {
+  if (step === "git-url-checking" || step === "cloning") {
     return (
-      <box flexDirection="column" alignItems="center" justifyContent="center" flexGrow={1}>
-        <text>{statusMsg}</text>
-      </box>
-    );
-  }
-
-  if (step === "cloning") {
-    return (
-      <box flexDirection="column" alignItems="center" justifyContent="center" flexGrow={1}>
-        <text>{statusMsg}</text>
-      </box>
+      <Box
+        flexDirection="column"
+        alignItems="center"
+        justifyContent="center"
+        flexGrow={1}
+      >
+        <Text>{statusMsg}</Text>
+      </Box>
     );
   }
 
   if (step === "error") {
     return (
-      <box flexDirection="column" alignItems="center" justifyContent="center" flexGrow={1} gap={2}>
-        <text fg="#ff5555">{errorMsg}</text>
-        <text>
-          <span attributes={TextAttributes.DIM}>Press </span>
-          <span>Enter</span>
-          <span attributes={TextAttributes.DIM}> to try again</span>
-        </text>
-      </box>
+      <Box
+        flexDirection="column"
+        alignItems="center"
+        justifyContent="center"
+        flexGrow={1}
+      >
+        <Text color="#ff5555">{errorMsg}</Text>
+        <Box marginTop={2}>
+          <Text dimColor>Press </Text>
+          <Text>Enter</Text>
+          <Text dimColor> to try again</Text>
+        </Box>
+      </Box>
     );
   }
 

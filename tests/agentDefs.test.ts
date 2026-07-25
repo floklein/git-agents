@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { isAbsolute } from "path";
 import { AGENT_DEFS, BASE_SYNC_FOLDERS, getSyncFolders } from "../src/utils/agentDefs";
 
