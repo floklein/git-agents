@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useKeyboard } from "@opentui/react";
+import { Box, useApp, useInput, useWindowSize } from "ink";
 import { MainMenuScreen } from "./screens/MainMenuScreen";
 import { SyncScreen } from "./screens/SyncScreen";
 import { SetupScreen } from "./screens/SetupScreen";
@@ -13,13 +13,17 @@ type Props = {
 export function App({ initialScreen, initialConfig }: Props) {
   const [screen, setScreen] = useState<Screen>(initialScreen);
   const [config, setConfig] = useState<Config | undefined>(initialConfig);
+  const { exit } = useApp();
+  const { rows } = useWindowSize();
 
-  useKeyboard((key) => {
-    if (key.ctrl && key.name === "c") process.exit(0);
+  useInput((input, key) => {
+    if (key.ctrl && input === "c") exit();
   });
 
+  let content;
+
   if (screen.id === "setup") {
-    return (
+    content = (
       <SetupScreen
         existingConfig={screen.existingConfig ?? config}
         onComplete={(newConfig) => {
@@ -28,20 +32,20 @@ export function App({ initialScreen, initialConfig }: Props) {
         }}
       />
     );
-  }
-
-  if (screen.id === "sync") {
-    return (
+  } else if (screen.id === "sync") {
+    content = (
       <SyncScreen
         mode={screen.mode}
         onBack={() => setScreen({ id: "main" })}
       />
     );
+  } else {
+    content = <MainMenuScreen onNavigate={(next) => setScreen(next)} />;
   }
 
   return (
-    <MainMenuScreen
-      onNavigate={(next) => setScreen(next)}
-    />
+    <Box flexDirection="column" height={rows}>
+      {content}
+    </Box>
   );
 }

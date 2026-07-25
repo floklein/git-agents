@@ -1,6 +1,7 @@
-import { useState, useEffect } from "react";
-import { useKeyboard } from "@opentui/react";
-import { TextAttributes } from "@opentui/core";
+import { useEffect, useState } from "react";
+import { Box, Text, useInput } from "ink";
+import BigText from "ink-big-text";
+import { SelectMenu } from "../components/SelectMenu";
 import { CONFIG_DIR } from "../utils/config";
 import { gitPull, gitAddCommitPush } from "../utils/shell";
 import { AGENT_DEFS } from "../utils/agentDefs";
@@ -20,9 +21,9 @@ export function SyncScreen({ mode, onBack }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [doneMessage, setDoneMessage] = useState("");
 
-  useKeyboard((key) => {
-    if (key.name === "escape") {
-      if (stage === "done" || stage === "review") onBack();
+  useInput((_input, key) => {
+    if (key.escape && (stage === "done" || stage === "review")) {
+      onBack();
     }
   });
 
@@ -31,7 +32,12 @@ export function SyncScreen({ mode, onBack }: Props) {
   useEffect(() => {
     async function load() {
       setStatus("Pulling remote changes...");
-      const result = await runSyncLoad(mode, AGENT_DEFS, CONFIG_DIR, shellDeps);
+      const result = await runSyncLoad(
+        mode,
+        AGENT_DEFS,
+        CONFIG_DIR,
+        shellDeps,
+      );
       if (result.type === "error") {
         setError(result.message);
         setStage("done");
@@ -41,7 +47,7 @@ export function SyncScreen({ mode, onBack }: Props) {
       setAgentDiffs(result.agentDiffs);
       setStage("review");
     }
-    load();
+    void load();
   }, []);
 
   async function executeSync(confirmed: boolean) {
@@ -51,9 +57,18 @@ export function SyncScreen({ mode, onBack }: Props) {
     }
 
     setStage("executing");
-    setStatus(mode === "pull" ? "Copying agents from remote..." : "Copying agents to remote...");
+    setStatus(
+      mode === "pull"
+        ? "Copying agents from remote..."
+        : "Copying agents to remote...",
+    );
 
-    const result = await runSyncExecute(mode, agentDiffs, CONFIG_DIR, shellDeps);
+    const result = await runSyncExecute(
+      mode,
+      agentDiffs,
+      CONFIG_DIR,
+      shellDeps,
+    );
     if (result.type === "error") {
       setError(result.message);
     } else {
@@ -67,131 +82,166 @@ export function SyncScreen({ mode, onBack }: Props) {
 
   if (stage === "loading" || stage === "executing") {
     return (
-      <box flexDirection="column" alignItems="center" justifyContent="center" flexGrow={1}>
-        <text>{status}</text>
-      </box>
+      <Box
+        flexDirection="column"
+        alignItems="center"
+        justifyContent="center"
+        flexGrow={1}
+      >
+        <Text>{status}</Text>
+      </Box>
     );
   }
 
   if (stage === "done") {
     return (
-      <box flexDirection="column" alignItems="center" justifyContent="center" flexGrow={1} gap={1}>
+      <Box
+        flexDirection="column"
+        alignItems="center"
+        justifyContent="center"
+        flexGrow={1}
+      >
         {error ? (
-          <text fg="#ff5555">{error}</text>
+          <Text color="#ff5555">{error}</Text>
         ) : (
-          <text fg="#50fa7b">{doneMessage}</text>
+          <Text color="#50fa7b">{doneMessage}</Text>
         )}
-        <text attributes={TextAttributes.DIM}>Press Esc to go back</text>
-      </box>
+        <Text dimColor>Press Esc to go back</Text>
+      </Box>
     );
   }
 
-  // review stage
-  const totalRemote = agentDiffs.reduce((acc, e) => acc + e.remoteCount, 0);
-  const totalLocal = agentDiffs.reduce((acc, e) => acc + e.localCount, 0);
+  const totalRemote = agentDiffs.reduce(
+    (acc, entry) => acc + entry.remoteCount,
+    0,
+  );
+  const totalLocal = agentDiffs.reduce(
+    (acc, entry) => acc + entry.localCount,
+    0,
+  );
 
-  const hasChanges = agentDiffs.some((e) =>
-    e.folderDiffs.some(
-      (fd) => fd.diff.added.length > 0 || fd.diff.removed.length > 0 || fd.diff.modified.length > 0
-    )
+  const hasChanges = agentDiffs.some((entry) =>
+    entry.folderDiffs.some(
+      (folderDiff) =>
+        folderDiff.diff.added.length > 0 ||
+        folderDiff.diff.removed.length > 0 ||
+        folderDiff.diff.modified.length > 0,
+    ),
   );
 
   return (
-    <box flexDirection="column" alignItems="center" justifyContent="center" flexGrow={1} gap={1}>
-      <ascii-font font="tiny" text={title} />
+    <Box
+      flexDirection="column"
+      alignItems="center"
+      justifyContent="center"
+      flexGrow={1}
+    >
+      <BigText text={title} font="tiny" />
 
-      <box
+      <Box
         flexDirection="column"
-        border={true}
-        borderStyle="rounded"
-        title=" Comparison "
+        borderStyle="round"
         paddingX={2}
         paddingY={1}
         width={60}
-        gap={1}
+        marginTop={1}
       >
-        <box flexDirection="row" justifyContent="space-between">
-          <text>
-            <span>Remote: </span>
-            <span fg="#8be9fd">{totalRemote} skills</span>
-          </text>
-          <text>
-            <span>Local: </span>
-            <span fg="#8be9fd">{totalLocal} skills</span>
-          </text>
-        </box>
+        <Text bold>Comparison</Text>
+        <Box flexDirection="row" justifyContent="space-between">
+          <Text>
+            Remote: <Text color="#8be9fd">{totalRemote} skills</Text>
+          </Text>
+          <Text>
+            Local: <Text color="#8be9fd">{totalLocal} skills</Text>
+          </Text>
+        </Box>
 
-        {agentDiffs.length === 0 && (
-          <text attributes={TextAttributes.DIM}>No agents found</text>
-        )}
+        {agentDiffs.length === 0 && <Text dimColor>No agents found</Text>}
 
         {agentDiffs.map((entry) => (
-          <box key={entry.defs.map((d) => d.id).join(",")} flexDirection="column">
-            <box flexDirection="row" justifyContent="space-between">
-              <text fg="#bd93f9">{entry.defs.map((d) => d.name).join(", ")}</text>
-              <text attributes={TextAttributes.DIM}>
+          <Box
+            key={entry.defs.map((definition) => definition.id).join(",")}
+            flexDirection="column"
+            marginTop={1}
+          >
+            <Box flexDirection="row" justifyContent="space-between">
+              <Text color="#bd93f9">
+                {entry.defs.map((definition) => definition.name).join(", ")}
+              </Text>
+              <Text dimColor>
                 {entry.remoteCount}↓ / {entry.localCount}↑
-              </text>
-            </box>
-            {entry.folderDiffs.map((fd) => {
-              const d = fd.diff;
-              const folderHasChanges = d.added.length > 0 || d.removed.length > 0 || d.modified.length > 0;
+              </Text>
+            </Box>
+            {entry.folderDiffs.map((folderDiff) => {
+              const diff = folderDiff.diff;
+              const folderHasChanges =
+                diff.added.length > 0 ||
+                diff.removed.length > 0 ||
+                diff.modified.length > 0;
               return (
-                <box key={fd.folder} flexDirection="column">
-                  <text>
-                    <span attributes={TextAttributes.DIM}>  {fd.folder}/</span>
-                  </text>
-                  {d.added.map((e) => (
-                    <text key={e.name}>
-                      <span fg="#50fa7b">    + </span>
-                      <span>{e.name}</span>
-                    </text>
+                <Box key={folderDiff.folder} flexDirection="column">
+                  <Text dimColor>  {folderDiff.folder}/</Text>
+                  {diff.added.map((entry) => (
+                    <Text key={entry.name}>
+                      <Text color="#50fa7b">    + </Text>
+                      {entry.name}
+                    </Text>
                   ))}
-                  {d.removed.map((e) => (
-                    <text key={e.name}>
-                      <span fg="#ff5555">    - </span>
-                      <span>{e.name}</span>
-                    </text>
+                  {diff.removed.map((entry) => (
+                    <Text key={entry.name}>
+                      <Text color="#ff5555">    - </Text>
+                      {entry.name}
+                    </Text>
                   ))}
-                  {d.modified.map((e) => (
-                    <text key={e.name}>
-                      <span fg="#ffb86c">    ~ </span>
-                      <span>{e.name}</span>
-                    </text>
+                  {diff.modified.map((entry) => (
+                    <Text key={entry.name}>
+                      <Text color="#ffb86c">    ~ </Text>
+                      {entry.name}
+                    </Text>
                   ))}
-                  {!folderHasChanges && d.unchanged.length > 0 && (
-                    <text attributes={TextAttributes.DIM}>
-                      {"    "}{d.unchanged.length} unchanged
-                    </text>
+                  {!folderHasChanges && diff.unchanged.length > 0 && (
+                    <Text dimColor>
+                      {"    "}
+                      {diff.unchanged.length} unchanged
+                    </Text>
                   )}
-                </box>
+                </Box>
               );
             })}
-          </box>
+          </Box>
         ))}
-      </box>
+      </Box>
 
-      <box flexDirection="column" alignItems="center" gap={1}>
-        <text>
-          <span>Confirm {mode}? </span>
-          <span attributes={TextAttributes.DIM}>(No is default — press Enter to cancel)</span>
-        </text>
-        <select
-          focused={true}
-          options={[
-            { name: "No, cancel", description: "Go back to main menu" },
-            {
-              name: `Yes, ${mode}`,
-              description: hasChanges ? "Apply changes" : "No changes to apply",
-            },
-          ]}
-          onSelect={(index) => executeSync(index === 1)}
-          width={30}
-          height={4}
-        />
-      </box>
+      <Box flexDirection="column" alignItems="center" marginTop={1}>
+        <Text>
+          Confirm {mode}?{" "}
+          <Text dimColor>(No is default, press Enter to cancel)</Text>
+        </Text>
+        <Box flexDirection="column" width={46}>
+          <SelectMenu
+            key={`confirm-${mode}`}
+            options={[
+              {
+                name: "No, cancel",
+                description: "Go back to main menu",
+                value: "cancel",
+              },
+              {
+                name: `Yes, ${mode}`,
+                description: hasChanges
+                  ? "Apply changes"
+                  : "No changes to apply",
+                value: "confirm",
+              },
+            ] as const}
+            onSelect={(item) => {
+              void executeSync(item.value === "confirm");
+            }}
+          />
+        </Box>
+      </Box>
 
-      <text attributes={TextAttributes.DIM}>Esc to cancel</text>
-    </box>
+      <Text dimColor>Esc to cancel</Text>
+    </Box>
   );
 }

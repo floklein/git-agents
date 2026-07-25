@@ -6,38 +6,28 @@ Supports **OpenCode**, **Claude Code**, **Codex**, **Cursor**, and [41 more](#su
 
 ## What it does
 
-`ga` keeps your AI agent directories in sync with a remote git repository — so your custom skills follow you everywhere.
+`ga` keeps your AI agent directories in sync with a remote git repository, so your custom skills follow you everywhere.
 
 ## Quick start
 
 ```bash
-bunx git-agents@latest
+npx git-agents@latest
 ```
 
 ## Install
 
 ```bash
-bun i -g git-agents
-```
-
-Or with npm:
-
-```bash
 npm i -g git-agents
 ```
-
-> **Requires [Bun](https://bun.sh)** — install it first if you haven't already:
-> ```bash
-> curl -fsSL https://bun.sh/install | bash
-> ```
 
 ### From source
 
 ```bash
 git clone https://github.com/floklein/git-agents.git
 cd git-agents
-bun install
-bun link   # makes `ga` and `git-agents` available globally
+npm install
+npm run build
+npm link   # makes `ga` and `git-agents` available globally
 ```
 
 ## Usage
@@ -54,9 +44,9 @@ ga push         # push local agents to remote
 
 On first launch, `ga` walks you through setup:
 
-1. **Choose a remote** — GitHub CLI (`gh`) or a custom git repo URL
-2. **GitHub CLI path** — auto-creates a private `git-agents-remote` repo on your account
-3. **Custom git path** — provide any accessible git remote URL
+1. **Choose a remote:** GitHub CLI (`gh`) or a custom git repo URL
+2. **GitHub CLI path:** auto-creates a private `git-agents-remote` repo on your account
+3. **Custom git path:** provide any accessible git remote URL
 4. Clones the repo to `~/.git-agents` and saves your config
 
 ### Pull / Push
@@ -75,7 +65,7 @@ Both operations show a comparison summary before doing anything:
   Confirm pull? [No, cancel] [Yes, pull]
 ```
 
-**No is always the default** — nothing happens unless you explicitly confirm.
+**No is always the default.** Nothing happens unless you explicitly confirm.
 
 ### Edit config
 
@@ -83,7 +73,8 @@ Select **Edit Config** from the main menu to reconfigure your remote at any time
 
 ## Requirements
 
-- [Bun](https://bun.sh)
+- [Node.js](https://nodejs.org) 22 or newer
+- npm
 - [git](https://git-scm.com)
 - [GitHub CLI](https://cli.github.com) *(only if using the GH CLI remote option)*
 
