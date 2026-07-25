@@ -40,6 +40,7 @@ type SetupStep =
 
 type Props = {
   existingConfig?: Config;
+  signal: AbortSignal;
   onComplete: (config: Config) => void;
 };
 
@@ -65,7 +66,7 @@ const REMOTE_ITEMS = [
   },
 ] as const;
 
-export function SetupScreen({ existingConfig, onComplete }: Props) {
+export function SetupScreen({ existingConfig, signal, onComplete }: Props) {
   const [step, setStep] = useState<SetupStep>("welcome");
   const [selectedRemote, setSelectedRemote] = useState<RemoteType>(
     existingConfig?.remote ?? "gh",
@@ -97,7 +98,7 @@ export function SetupScreen({ existingConfig, onComplete }: Props) {
   async function recheckGhAuth() {
     setStep("gh-checking");
     setStatusMsg("Checking gh auth...");
-    const auth = await checkGhAuth();
+    const auth = await checkGhAuth(signal);
     if (!auth.ok) {
       setStep("gh-auth-needed");
       return;
@@ -106,16 +107,17 @@ export function SetupScreen({ existingConfig, onComplete }: Props) {
   }
 
   const shellDeps = {
-    checkGhInstalled,
-    checkGhAuth,
-    ghRepoExists,
-    ghCreateRepo,
-    ghGetRepoCloneUrl,
-    checkGitRepoExists,
-    cloneRepo: (url: string) => cloneRepo(url, CONFIG_DIR),
+    checkGhInstalled: () => checkGhInstalled(signal),
+    checkGhAuth: () => checkGhAuth(signal),
+    ghRepoExists: (name: string) => ghRepoExists(name, signal),
+    ghCreateRepo: (name: string) => ghCreateRepo(name, signal),
+    ghGetRepoCloneUrl: (name: string) => ghGetRepoCloneUrl(name, signal),
+    checkGitRepoExists: (url: string) => checkGitRepoExists(url, signal),
+    cloneRepo: (url: string) => cloneRepo(url, CONFIG_DIR, signal),
     isAlreadyCloned: () => existsSync(join(CONFIG_DIR, ".git")),
     writeConfig,
-    gitSetRemoteUrl,
+    gitSetRemoteUrl: (dir: string, url: string) =>
+      gitSetRemoteUrl(dir, url, signal),
   };
 
   async function startGhFlow() {
@@ -227,7 +229,12 @@ export function SetupScreen({ existingConfig, onComplete }: Props) {
         flexGrow={1}
       >
         <Text>Choose how to connect your remote:</Text>
-        <Box flexDirection="column" width={68} marginTop={1}>
+        <Box
+          flexDirection="column"
+          width={68}
+          marginTop={1}
+          flexShrink={0}
+        >
           <SelectMenu
             key="choose-remote"
             options={REMOTE_ITEMS}
@@ -243,7 +250,9 @@ export function SetupScreen({ existingConfig, onComplete }: Props) {
             }}
           />
         </Box>
-        <Text dimColor>↑↓ navigate  Enter select</Text>
+        <Box flexShrink={0}>
+          <Text dimColor>↑↓ navigate  Enter select</Text>
+        </Box>
       </Box>
     );
   }

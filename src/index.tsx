@@ -17,7 +17,9 @@ const initialScreen: Screen =
     ? { id: "sync", mode: "push" }
     : { id: "main" };
 
-render(
+const app = render(
   <App initialScreen={initialScreen} initialConfig={config ?? undefined} />,
   { alternateScreen: true, exitOnCtrlC: false },
 );
+
+await app.waitUntilExit();

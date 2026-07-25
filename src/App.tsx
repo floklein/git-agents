@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Box, useApp, useInput, useWindowSize } from "ink";
 import { MainMenuScreen } from "./screens/MainMenuScreen";
 import { SyncScreen } from "./screens/SyncScreen";
@@ -13,11 +13,20 @@ type Props = {
 export function App({ initialScreen, initialConfig }: Props) {
   const [screen, setScreen] = useState<Screen>(initialScreen);
   const [config, setConfig] = useState<Config | undefined>(initialConfig);
+  const abortController = useRef(new AbortController());
   const { exit } = useApp();
   const { rows } = useWindowSize();
 
+  useEffect(() => {
+    return () => abortController.current.abort();
+  }, []);
+
   useInput((input, key) => {
-    if (key.ctrl && input === "c") exit();
+    if (key.ctrl && input === "c") {
+      abortController.current.abort();
+      process.exitCode = 130;
+      exit();
+    }
   });
 
   let content;
@@ -26,6 +35,7 @@ export function App({ initialScreen, initialConfig }: Props) {
     content = (
       <SetupScreen
         existingConfig={screen.existingConfig ?? config}
+        signal={abortController.current.signal}
         onComplete={(newConfig) => {
           setConfig(newConfig);
           setScreen({ id: "main" });
@@ -36,6 +46,7 @@ export function App({ initialScreen, initialConfig }: Props) {
     content = (
       <SyncScreen
         mode={screen.mode}
+        signal={abortController.current.signal}
         onBack={() => setScreen({ id: "main" })}
       />
     );

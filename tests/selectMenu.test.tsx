@@ -36,6 +36,21 @@ describe("SelectMenu", () => {
     view.unmount();
   });
 
+  it("selects the updated option when navigation and Enter are buffered", async () => {
+    const onSelect = vi.fn();
+    const view = render(
+      <SelectMenu options={OPTIONS} onSelect={onSelect} />,
+    );
+
+    view.stdin.write("\u001B[B\r");
+
+    await vi.waitFor(() => {
+      expect(view.lastFrame()).toContain("❯ Second");
+      expect(onSelect).toHaveBeenCalledWith(OPTIONS[1]);
+    });
+    view.unmount();
+  });
+
   it("supports j and k navigation", async () => {
     const onSelect = vi.fn();
     const view = render(

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 
 export type SelectOption<T extends string> = {
@@ -21,26 +21,36 @@ export function SelectMenu<T extends string>({
   isFocused = true,
 }: Props<T>) {
   const lastIndex = Math.max(0, options.length - 1);
-  const [selectedIndex, setSelectedIndex] = useState(
-    Math.min(Math.max(0, initialIndex), lastIndex),
-  );
+  const initialSelectedIndex = Math.min(Math.max(0, initialIndex), lastIndex);
+  const [selectedIndex, setSelectedIndex] = useState(initialSelectedIndex);
+  const selectedIndexRef = useRef(initialSelectedIndex);
 
   useInput(
     (input, key) => {
       const pageSize = key.shift ? 5 : 1;
 
       if (key.upArrow || input === "k") {
-        setSelectedIndex((index) => Math.max(0, index - pageSize));
+        const nextIndex = Math.max(
+          0,
+          selectedIndexRef.current - pageSize,
+        );
+        selectedIndexRef.current = nextIndex;
+        setSelectedIndex(nextIndex);
         return;
       }
 
       if (key.downArrow || input === "j") {
-        setSelectedIndex((index) => Math.min(lastIndex, index + pageSize));
+        const nextIndex = Math.min(
+          lastIndex,
+          selectedIndexRef.current + pageSize,
+        );
+        selectedIndexRef.current = nextIndex;
+        setSelectedIndex(nextIndex);
         return;
       }
 
       if (key.return) {
-        const option = options[selectedIndex];
+        const option = options[selectedIndexRef.current];
         if (option) onSelect(option);
       }
     },

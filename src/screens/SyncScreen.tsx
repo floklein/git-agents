@@ -11,10 +11,11 @@ type Stage = "loading" | "review" | "executing" | "done";
 
 type Props = {
   mode: "pull" | "push";
+  signal: AbortSignal;
   onBack: () => void;
 };
 
-export function SyncScreen({ mode, onBack }: Props) {
+export function SyncScreen({ mode, signal, onBack }: Props) {
   const [stage, setStage] = useState<Stage>("loading");
   const [status, setStatus] = useState("Fetching remote...");
   const [agentDiffs, setAgentDiffs] = useState<AgentDiffEntry[]>([]);
@@ -27,7 +28,11 @@ export function SyncScreen({ mode, onBack }: Props) {
     }
   });
 
-  const shellDeps = { gitPull, gitAddCommitPush };
+  const shellDeps = {
+    gitPull: (dir: string) => gitPull(dir, signal),
+    gitAddCommitPush: (dir: string, message: string) =>
+      gitAddCommitPush(dir, message, signal),
+  };
 
   useEffect(() => {
     async function load() {
@@ -212,7 +217,12 @@ export function SyncScreen({ mode, onBack }: Props) {
         ))}
       </Box>
 
-      <Box flexDirection="column" alignItems="center" marginTop={1}>
+      <Box
+        flexDirection="column"
+        alignItems="center"
+        marginTop={1}
+        flexShrink={0}
+      >
         <Text>
           Confirm {mode}?{" "}
           <Text dimColor>(No is default, press Enter to cancel)</Text>
@@ -241,7 +251,9 @@ export function SyncScreen({ mode, onBack }: Props) {
         </Box>
       </Box>
 
-      <Text dimColor>Esc to cancel</Text>
+      <Box flexShrink={0}>
+        <Text dimColor>Esc to cancel</Text>
+      </Box>
     </Box>
   );
 }
