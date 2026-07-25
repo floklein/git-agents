@@ -1,4 +1,4 @@
-import { join, relative } from "path";
+import { isAbsolute, join, relative, resolve, sep } from "path";
 import { homedir } from "os";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { ConfigSchema, type Config } from "../types";
@@ -26,7 +26,35 @@ export function writeConfig(
   writeFileSync(configFile, JSON.stringify(config, null, 2), "utf8");
 }
 
-export function getSyncDirForAgent(globalPath: string): string {
-  const rel = relative(homedir(), globalPath);
-  return join(CONFIG_DIR, rel);
+export function resolveSyncPath(baseDir: string, syncPath: string): string {
+  if (!syncPath.trim() || isAbsolute(syncPath)) {
+    throw new Error(`Sync path must be relative: ${syncPath}`);
+  }
+
+  const segments = syncPath.split(/[\\/]/);
+  if (segments.some((segment) => !segment || segment === "..")) {
+    throw new Error(`Invalid sync path: ${syncPath}`);
+  }
+
+  const base = resolve(baseDir);
+  const target = resolve(base, ...segments);
+  const rel = relative(base, target);
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new Error(`Sync path escapes its base directory: ${syncPath}`);
+  }
+  return target;
+}
+
+export function getLocalSyncPath(
+  syncPath: string,
+  homeDir: string = homedir(),
+): string {
+  return resolveSyncPath(homeDir, syncPath);
+}
+
+export function getRemoteSyncPath(
+  syncPath: string,
+  configDir: string = CONFIG_DIR,
+): string {
+  return resolveSyncPath(configDir, syncPath);
 }

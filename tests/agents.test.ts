@@ -1,281 +1,635 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, writeFileSync, rmSync, existsSync } from "fs";
-import { join } from "path";
-import { tmpdir } from "os";
-import { listAgents, diffAgents, copyAgentsDir, matchesAllowlist } from "../src/utils/agents";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import {
+  compareSyncPathSnapshots,
+  mirrorSyncPath,
+  snapshotSyncPath,
+} from "../src/utils/agents";
 
-function mkTmp(): string {
-  const dir = join(tmpdir(), `git-agents-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  mkdirSync(dir, { recursive: true });
-  return dir;
-}
-
-function mkAgent(base: string, name: string, files: string[] = [], content?: string): void {
-  const agentDir = join(base, name);
-  mkdirSync(agentDir, { recursive: true });
-  for (const f of files) {
-    writeFileSync(join(agentDir, f), content ?? "");
-  }
-}
-
-let tmpDirs: string[] = [];
+const tmpDirs: string[] = [];
 
 function useTmp(): string {
-  const dir = mkTmp();
+  const dir = mkdtempSync(join(tmpdir(), "git-agents-test-"));
   tmpDirs.push(dir);
   return dir;
 }
 
+function writeFixture(path: string, content: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, content, "utf8");
+}
+
+function requiredSnapshot(path: string) {
+  const snapshot = snapshotSyncPath(path);
+  expect(snapshot).not.toBeNull();
+  return snapshot!;
+}
+
 afterEach(() => {
-  for (const dir of tmpDirs) {
+  for (const dir of tmpDirs.splice(0)) {
     if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
   }
-  tmpDirs = [];
 });
 
-describe("listAgents", () => {
-  it("returns [] for non-existent directory", () => {
-    expect(listAgents("/this/does/not/exist")).toEqual([]);
+describe("snapshotSyncPath", () => {
+  it("returns null for a missing path", () => {
+    const missing = join(useTmp(), "missing");
+
+    expect(snapshotSyncPath(missing)).toBeNull();
   });
 
-  it("returns [] for empty directory", () => {
-    const dir = useTmp();
-    expect(listAgents(dir)).toEqual([]);
+  it("snapshots a file using its content", () => {
+    const file = join(useTmp(), "AGENTS.md");
+    writeFixture(file, "Use focused tests.\n");
+
+    const snapshot = requiredSnapshot(file);
+
+    expect(snapshot.kind).toBe("file");
+    expect(snapshot.fileCount).toBe(1);
+    expect(snapshot.contentHash).toHaveLength(64);
   });
 
-  it("returns sorted entries with correct fileCount and contentHash", () => {
-    const dir = useTmp();
-    mkAgent(dir, "zebra", ["a.ts", "b.ts"]);
-    mkAgent(dir, "alpha", ["x.ts"]);
-    mkAgent(dir, "middle", []);
+  it("includes direct files, nested files, and empty directories", () => {
+    const source = useTmp();
+    const identical = useTmp();
 
-    const result = listAgents(dir);
-    expect(result).toHaveLength(3);
-    expect(result[0]!.name).toBe("alpha");
-    expect(result[0]!.fileCount).toBe(1);
-    expect(typeof result[0]!.contentHash).toBe("string");
-    expect(result[0]!.contentHash).toHaveLength(64);
-    expect(result[1]!.name).toBe("middle");
-    expect(result[1]!.fileCount).toBe(0);
-    expect(result[2]!.name).toBe("zebra");
-    expect(result[2]!.fileCount).toBe(2);
+    writeFixture(join(source, "direct.md"), "direct");
+    writeFixture(join(source, "nested", "deep.md"), "nested");
+    mkdirSync(join(source, "empty"), { recursive: true });
+
+    writeFixture(join(identical, "direct.md"), "direct");
+    writeFixture(join(identical, "nested", "deep.md"), "nested");
+    mkdirSync(join(identical, "empty"), { recursive: true });
+
+    const sourceSnapshot = requiredSnapshot(source);
+    const identicalSnapshot = requiredSnapshot(identical);
+
+    expect(sourceSnapshot.kind).toBe("directory");
+    expect(sourceSnapshot.fileCount).toBe(2);
+    expect(compareSyncPathSnapshots(sourceSnapshot, identicalSnapshot)).toBe(
+      "unchanged",
+    );
+
+    rmSync(join(identical, "empty"), { recursive: true });
+    expect(
+      compareSyncPathSnapshots(sourceSnapshot, requiredSnapshot(identical)),
+    ).toBe("modified");
   });
 
-  it("ignores files (non-directories)", () => {
-    const dir = useTmp();
-    writeFileSync(join(dir, "not-a-dir.txt"), "hello");
-    mkAgent(dir, "real-agent", ["file.ts"]);
+  it("detects same-size content changes", () => {
+    const file = join(useTmp(), "prompt.md");
+    writeFixture(file, "alpha");
+    const before = requiredSnapshot(file);
 
-    const result = listAgents(dir);
-    expect(result).toHaveLength(1);
-    expect(result[0]!.name).toBe("real-agent");
+    writeFixture(file, "bravo");
+    const after = requiredSnapshot(file);
+
+    expect(before.contentHash).not.toBe(after.contentHash);
+    expect(compareSyncPathSnapshots(before, after)).toBe("modified");
   });
 
-  it("filters by allowedFolders when provided", () => {
-    const dir = useTmp();
-    mkAgent(dir, "skills", ["a.ts"]);
-    mkAgent(dir, "cache", ["b.ts"]);
-    mkAgent(dir, "commands", ["c.ts"]);
+  it.skipIf(process.platform === "win32")(
+    "detects executable permission changes",
+    () => {
+      const file = join(useTmp(), "review.sh");
+      writeFixture(file, "#!/bin/sh\n");
+      chmodSync(file, 0o644);
+      const before = requiredSnapshot(file);
 
-    const result = listAgents(dir, ["skills", "commands"]);
-    expect(result).toHaveLength(2);
-    expect(result.map((e) => e.name)).toEqual(["commands", "skills"]);
-  });
+      chmodSync(file, 0o755);
+      const after = requiredSnapshot(file);
 
-  it("supports glob patterns in allowedFolders", () => {
-    const dir = useTmp();
-    mkAgent(dir, "rules", ["a.ts"]);
-    mkAgent(dir, "rules-code", ["b.ts"]);
-    mkAgent(dir, "rules-architect", ["c.ts"]);
-    mkAgent(dir, "cache", ["d.ts"]);
+      expect(before.contentHash).not.toBe(after.contentHash);
+      expect(compareSyncPathSnapshots(before, after)).toBe("modified");
+    },
+  );
 
-    const result = listAgents(dir, ["rules", "rules-*"]);
-    expect(result).toHaveLength(3);
-    expect(result.map((e) => e.name)).toEqual(["rules", "rules-architect", "rules-code"]);
-  });
+  it.skipIf(process.platform === "win32")(
+    "normalizes executable permissions to the Git mode model",
+    () => {
+      const file = join(useTmp(), "review.sh");
+      writeFixture(file, "#!/bin/sh\n");
+      chmodSync(file, 0o700);
+      const ownerExecutable = requiredSnapshot(file);
 
-  it("returns all when allowedFolders is undefined", () => {
-    const dir = useTmp();
-    mkAgent(dir, "skills", ["a.ts"]);
-    mkAgent(dir, "cache", ["b.ts"]);
+      chmodSync(file, 0o755);
+      const allExecutable = requiredSnapshot(file);
+      chmodSync(file, 0o655);
+      const groupAndOtherExecutable = requiredSnapshot(file);
+      chmodSync(file, 0o644);
+      const nonExecutable = requiredSnapshot(file);
 
-    const result = listAgents(dir);
-    expect(result).toHaveLength(2);
-  });
-});
+      expect(
+        compareSyncPathSnapshots(ownerExecutable, allExecutable),
+      ).toBe("unchanged");
+      expect(
+        compareSyncPathSnapshots(allExecutable, nonExecutable),
+      ).toBe("modified");
+      expect(
+        compareSyncPathSnapshots(groupAndOtherExecutable, nonExecutable),
+      ).toBe("unchanged");
+    },
+  );
 
-describe("matchesAllowlist", () => {
-  it("matches exact names", () => {
-    expect(matchesAllowlist("skills", ["skills", "rules"])).toBe(true);
-    expect(matchesAllowlist("cache", ["skills", "rules"])).toBe(false);
-  });
+  it("detects path and type changes", () => {
+    const left = useTmp();
+    const right = useTmp();
+    writeFixture(join(left, "first.md"), "same");
+    writeFixture(join(right, "second.md"), "same");
 
-  it("matches glob prefix patterns", () => {
-    expect(matchesAllowlist("rules-code", ["rules-*"])).toBe(true);
-    expect(matchesAllowlist("rules-architect", ["rules-*"])).toBe(true);
-    expect(matchesAllowlist("rules", ["rules-*"])).toBe(false);
-    expect(matchesAllowlist("skills-code", ["rules-*"])).toBe(false);
-  });
+    expect(
+      compareSyncPathSnapshots(
+        requiredSnapshot(left),
+        requiredSnapshot(right),
+      ),
+    ).toBe("modified");
 
-  it("returns false for empty patterns", () => {
-    expect(matchesAllowlist("anything", [])).toBe(false);
-  });
-});
+    const file = join(useTmp(), "target");
+    const directory = join(useTmp(), "target");
+    writeFixture(file, "content");
+    mkdirSync(directory, { recursive: true });
 
-describe("diffAgents", () => {
-  it("returns all empty for two empty dirs", () => {
-    const src = useTmp();
-    const dst = useTmp();
-    expect(diffAgents(src, dst)).toEqual({ added: [], removed: [], modified: [], unchanged: [] });
-  });
-
-  it("marks agents only in source as added", () => {
-    const src = useTmp();
-    const dst = useTmp();
-    mkAgent(src, "new-agent", ["file.ts"]);
-
-    const { added, removed, modified, unchanged } = diffAgents(src, dst);
-    expect(added).toHaveLength(1);
-    expect(added[0]!.name).toBe("new-agent");
-    expect(removed).toHaveLength(0);
-    expect(modified).toHaveLength(0);
-    expect(unchanged).toHaveLength(0);
-  });
-
-  it("marks agents only in dest as removed", () => {
-    const src = useTmp();
-    const dst = useTmp();
-    mkAgent(dst, "old-agent", ["file.ts"]);
-
-    const { added, removed, modified, unchanged } = diffAgents(src, dst);
-    expect(removed).toHaveLength(1);
-    expect(removed[0]!.name).toBe("old-agent");
-    expect(added).toHaveLength(0);
-    expect(modified).toHaveLength(0);
-    expect(unchanged).toHaveLength(0);
-  });
-
-  it("marks agents with identical files as unchanged", () => {
-    const src = useTmp();
-    const dst = useTmp();
-    mkAgent(src, "agent", ["a.ts", "b.ts"]);
-    mkAgent(dst, "agent", ["a.ts", "b.ts"]);
-
-    const { unchanged, added, removed, modified } = diffAgents(src, dst);
-    expect(unchanged).toHaveLength(1);
-    expect(unchanged[0]!.name).toBe("agent");
-    expect(added).toHaveLength(0);
-    expect(removed).toHaveLength(0);
-    expect(modified).toHaveLength(0);
-  });
-
-  it("marks agents with different files but same count as modified", () => {
-    const src = useTmp();
-    const dst = useTmp();
-    mkAgent(src, "agent", ["a.ts", "b.ts"]);
-    mkAgent(dst, "agent", ["c.ts", "d.ts"]);
-
-    const { modified, added, removed, unchanged } = diffAgents(src, dst);
-    expect(modified).toHaveLength(1);
-    expect(modified[0]!.name).toBe("agent");
-    expect(added).toHaveLength(0);
-    expect(removed).toHaveLength(0);
-    expect(unchanged).toHaveLength(0);
-  });
-
-  it("marks agents with different file count as modified", () => {
-    const src = useTmp();
-    const dst = useTmp();
-    mkAgent(src, "agent", ["a.ts", "b.ts", "c.ts"]);
-    mkAgent(dst, "agent", ["a.ts"]);
-
-    const { modified, added, removed, unchanged } = diffAgents(src, dst);
-    expect(modified).toHaveLength(1);
-    expect(modified[0]!.name).toBe("agent");
-    expect(added).toHaveLength(0);
-    expect(removed).toHaveLength(0);
-    expect(unchanged).toHaveLength(0);
-  });
-
-  it("marks agents with different file sizes as modified", () => {
-    const src = useTmp();
-    const dst = useTmp();
-    mkAgent(src, "agent", ["a.ts"], "short");
-    mkAgent(dst, "agent", ["a.ts"], "much longer content");
-
-    const { modified } = diffAgents(src, dst);
-    expect(modified).toHaveLength(1);
-    expect(modified[0]!.name).toBe("agent");
-  });
-
-  it("handles mixed scenario across all categories", () => {
-    const src = useTmp();
-    const dst = useTmp();
-    mkAgent(src, "will-add", ["x.ts"]);
-    mkAgent(src, "will-modify", ["a.ts", "b.ts"]);
-    mkAgent(src, "will-stay", ["a.ts"]);
-    mkAgent(dst, "will-remove", ["y.ts"]);
-    mkAgent(dst, "will-modify", ["a.ts"]);
-    mkAgent(dst, "will-stay", ["a.ts"]);
-
-    const diff = diffAgents(src, dst);
-    expect(diff.added.map((e) => e.name)).toEqual(["will-add"]);
-    expect(diff.removed.map((e) => e.name)).toEqual(["will-remove"]);
-    expect(diff.modified.map((e) => e.name)).toEqual(["will-modify"]);
-    expect(diff.unchanged.map((e) => e.name)).toEqual(["will-stay"]);
-  });
-
-  it("only diffs allowed folders when allowedFolders is provided", () => {
-    const src = useTmp();
-    const dst = useTmp();
-    mkAgent(src, "skills", ["a.ts"]);
-    mkAgent(src, "cache", ["b.ts"]);
-    mkAgent(dst, "skills", ["a.ts"]);
-    mkAgent(dst, "cache", ["c.ts"]);
-
-    const diff = diffAgents(src, dst, ["skills"]);
-    expect(diff.unchanged.map((e) => e.name)).toEqual(["skills"]);
-    expect(diff.added).toHaveLength(0);
-    expect(diff.removed).toHaveLength(0);
-    expect(diff.modified).toHaveLength(0);
+    expect(
+      compareSyncPathSnapshots(
+        requiredSnapshot(file),
+        requiredSnapshot(directory),
+      ),
+    ).toBe("modified");
   });
 });
 
-describe("copyAgentsDir", () => {
-  it("copies files from source to destination", () => {
-    const src = useTmp();
-    const dst = useTmp();
-    mkAgent(src, "my-agent", ["commands.ts", "settings.json"]);
+describe("compareSyncPathSnapshots", () => {
+  it("classifies missing and identical paths", () => {
+    const file = join(useTmp(), "skill.md");
+    writeFixture(file, "skill");
+    const snapshot = requiredSnapshot(file);
 
-    copyAgentsDir(src, dst);
+    expect(compareSyncPathSnapshots(snapshot, null)).toBe("added");
+    expect(compareSyncPathSnapshots(null, snapshot)).toBe("removed");
+    expect(compareSyncPathSnapshots(null, null)).toBe("unchanged");
+    expect(compareSyncPathSnapshots(snapshot, snapshot)).toBe("unchanged");
+  });
+});
 
-    const result = listAgents(dst);
-    expect(result).toHaveLength(1);
-    expect(result[0]!.name).toBe("my-agent");
-    expect(result[0]!.fileCount).toBe(2);
+describe("mirrorSyncPath", () => {
+  it("replaces a destination directory with a source file", () => {
+    const source = join(useTmp(), "AGENTS.md");
+    const destination = join(useTmp(), "config", "AGENTS.md");
+    writeFixture(source, "portable instructions");
+    writeFixture(join(destination, "stale.md"), "stale");
+
+    mirrorSyncPath(source, destination);
+
+    expect(lstatSync(destination).isFile()).toBe(true);
+    expect(readFileSync(destination, "utf8")).toBe("portable instructions");
   });
 
-  it("creates destination directory if it doesn't exist", () => {
-    const src = useTmp();
-    const dst = join(useTmp(), "nested", "path");
-    mkAgent(src, "agent", ["file.ts"]);
+  it("exactly replaces a destination directory and removes stale entries", () => {
+    const source = join(useTmp(), "skills");
+    const destination = join(useTmp(), "skills");
 
-    expect(existsSync(dst)).toBe(false);
-    copyAgentsDir(src, dst);
-    expect(existsSync(dst)).toBe(true);
+    writeFixture(join(source, "direct.md"), "source direct");
+    writeFixture(join(source, "nested", "deep.md"), "source nested");
+    mkdirSync(join(source, "empty"), { recursive: true });
+
+    writeFixture(join(destination, "direct.md"), "old direct");
+    writeFixture(join(destination, "stale.md"), "stale direct");
+    writeFixture(join(destination, "nested", "stale.md"), "stale nested");
+    writeFixture(join(destination, "obsolete", "old.md"), "obsolete");
+
+    mirrorSyncPath(source, destination);
+
+    expect(lstatSync(destination).isDirectory()).toBe(true);
+    expect(readFileSync(join(destination, "direct.md"), "utf8")).toBe(
+      "source direct",
+    );
+    expect(readFileSync(join(destination, "nested", "deep.md"), "utf8")).toBe(
+      "source nested",
+    );
+    expect(lstatSync(join(destination, "empty")).isDirectory()).toBe(true);
+    expect(existsSync(join(destination, "stale.md"))).toBe(false);
+    expect(existsSync(join(destination, "nested", "stale.md"))).toBe(false);
+    expect(existsSync(join(destination, "obsolete"))).toBe(false);
+    expect(
+      readdirSync(dirname(destination)).some((name) =>
+        name.includes(".git-agents-")
+      ),
+    ).toBe(false);
+    expect(
+      compareSyncPathSnapshots(
+        requiredSnapshot(source),
+        requiredSnapshot(destination),
+      ),
+    ).toBe("unchanged");
   });
 
-  it("only copies allowed folders when filtering", () => {
-    const src = useTmp();
-    const dst = useTmp();
-    mkAgent(src, "skills", ["a.ts"]);
-    mkAgent(src, "cache", ["b.ts"]);
-    mkAgent(src, "commands", ["c.ts"]);
+  it("replaces a destination file with a source directory", () => {
+    const source = join(useTmp(), "agents");
+    const destination = join(useTmp(), "agents");
+    writeFixture(join(source, "reviewer.md"), "Review carefully.");
+    writeFixture(destination, "old file");
 
-    copyAgentsDir(src, dst, ["skills", "commands"]);
+    mirrorSyncPath(source, destination);
 
-    const result = listAgents(dst);
-    expect(result).toHaveLength(2);
-    expect(result.map((e) => e.name)).toEqual(["commands", "skills"]);
+    expect(lstatSync(destination).isDirectory()).toBe(true);
+    expect(readFileSync(join(destination, "reviewer.md"), "utf8")).toBe(
+      "Review carefully.",
+    );
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "preserves executable permission bits",
+    () => {
+      const source = join(useTmp(), "commands");
+      const destination = join(useTmp(), "commands");
+      const sourceExecutable = join(source, "review.sh");
+      const sourceRegular = join(source, "instructions.md");
+      writeFixture(sourceExecutable, "#!/bin/sh\n");
+      writeFixture(sourceRegular, "Review carefully.\n");
+      chmodSync(sourceExecutable, 0o755);
+      chmodSync(sourceRegular, 0o644);
+
+      writeFixture(join(destination, "review.sh"), "stale");
+      chmodSync(join(destination, "review.sh"), 0o644);
+
+      mirrorSyncPath(source, destination);
+
+      expect(lstatSync(join(destination, "review.sh")).mode & 0o111).toBe(
+        0o111,
+      );
+      expect(lstatSync(join(destination, "instructions.md")).mode & 0o111).toBe(
+        0,
+      );
+      expect(
+        compareSyncPathSnapshots(
+          requiredSnapshot(source),
+          requiredSnapshot(destination),
+        ),
+      ).toBe("unchanged");
+    },
+  );
+
+  it.skipIf(process.platform !== "win32")(
+    "materializes a leaf directory junction source",
+    () => {
+      const root = useTmp();
+      const target = join(root, "junction-target");
+      const source = join(root, "source-junction");
+      const destination = join(useTmp(), "skills");
+      writeFixture(join(target, "direct.md"), "source direct");
+      writeFixture(join(target, "nested", "deep.md"), "source nested");
+      mkdirSync(join(target, "empty"), { recursive: true });
+      symlinkSync(target, source, "junction");
+      writeFixture(join(destination, "stale.md"), "stale");
+
+      expect(requiredSnapshot(source).kind).toBe("directory");
+
+      mirrorSyncPath(source, destination);
+
+      expect(lstatSync(source).isSymbolicLink()).toBe(true);
+      expect(lstatSync(destination).isDirectory()).toBe(true);
+      expect(lstatSync(destination).isSymbolicLink()).toBe(false);
+      expect(readFileSync(join(destination, "direct.md"), "utf8")).toBe(
+        "source direct",
+      );
+      expect(readFileSync(join(destination, "nested", "deep.md"), "utf8")).toBe(
+        "source nested",
+      );
+      expect(lstatSync(join(destination, "empty")).isDirectory()).toBe(true);
+      expect(existsSync(join(destination, "stale.md"))).toBe(false);
+      expect(
+        compareSyncPathSnapshots(
+          requiredSnapshot(source),
+          requiredSnapshot(destination),
+        ),
+      ).toBe("unchanged");
+    },
+  );
+
+  it.skipIf(process.platform !== "win32")(
+    "materializes nested directory junctions as portable content",
+    () => {
+      const root = useTmp();
+      const sourceBase = join(root, "source");
+      const destinationBase = join(root, "destination");
+      const source = join(sourceBase, "skills");
+      const shared = join(root, "shared-skill");
+      const nestedJunction = join(source, "shared");
+      const destination = join(destinationBase, "skills");
+      writeFixture(join(source, "direct.md"), "source direct");
+      writeFixture(join(shared, "SKILL.md"), "shared instructions");
+      symlinkSync(shared, nestedJunction, "junction");
+      mkdirSync(destinationBase, { recursive: true });
+
+      mirrorSyncPath(
+        source,
+        destination,
+        sourceBase,
+        destinationBase,
+      );
+
+      expect(lstatSync(nestedJunction).isSymbolicLink()).toBe(true);
+      expect(lstatSync(join(destination, "shared")).isDirectory()).toBe(true);
+      expect(lstatSync(join(destination, "shared")).isSymbolicLink()).toBe(
+        false,
+      );
+      expect(
+        readFileSync(join(destination, "shared", "SKILL.md"), "utf8"),
+      ).toBe("shared instructions");
+      expect(
+        compareSyncPathSnapshots(
+          requiredSnapshot(source),
+          requiredSnapshot(destination),
+        ),
+      ).toBe("unchanged");
+    },
+  );
+
+  it.skipIf(process.platform !== "win32")(
+    "mirrors into a leaf directory junction without replacing it",
+    () => {
+      const source = join(useTmp(), "skills");
+      const root = useTmp();
+      const target = join(root, "junction-target");
+      const destination = join(root, "destination-junction");
+      writeFixture(join(source, "direct.md"), "source direct");
+      writeFixture(join(source, "nested", "deep.md"), "source nested");
+      mkdirSync(join(source, "empty"), { recursive: true });
+      writeFixture(join(target, "direct.md"), "old direct");
+      writeFixture(join(target, "stale.md"), "stale direct");
+      writeFixture(join(target, "nested", "stale.md"), "stale nested");
+      symlinkSync(target, destination, "junction");
+      const junctionTarget = readlinkSync(destination);
+
+      mirrorSyncPath(source, destination);
+
+      expect(lstatSync(destination).isSymbolicLink()).toBe(true);
+      expect(readlinkSync(destination)).toBe(junctionTarget);
+      expect(readFileSync(join(target, "direct.md"), "utf8")).toBe(
+        "source direct",
+      );
+      expect(readFileSync(join(target, "nested", "deep.md"), "utf8")).toBe(
+        "source nested",
+      );
+      expect(lstatSync(join(target, "empty")).isDirectory()).toBe(true);
+      expect(existsSync(join(target, "stale.md"))).toBe(false);
+      expect(existsSync(join(target, "nested", "stale.md"))).toBe(false);
+      expect(
+        compareSyncPathSnapshots(
+          requiredSnapshot(source),
+          requiredSnapshot(destination),
+        ),
+      ).toBe("unchanged");
+    },
+  );
+
+  it.skipIf(process.platform !== "win32")(
+    "rejects a source junction whose target contains the junction",
+    () => {
+      const root = useTmp();
+      const sourceBase = join(root, "source");
+      const destinationBase = join(root, "destination");
+      const source = join(sourceBase, "skills");
+      const destination = join(destinationBase, "skills");
+      writeFixture(join(sourceBase, "keep.md"), "keep source");
+      mkdirSync(destinationBase, { recursive: true });
+      symlinkSync(sourceBase, source, "junction");
+
+      expect(() =>
+        mirrorSyncPath(
+          source,
+          destination,
+          sourceBase,
+          destinationBase,
+        )
+      ).toThrow("target contains the link");
+      expect(lstatSync(source).isSymbolicLink()).toBe(true);
+      expect(readFileSync(join(sourceBase, "keep.md"), "utf8")).toBe(
+        "keep source",
+      );
+      expect(existsSync(destination)).toBe(false);
+    },
+  );
+
+  it.skipIf(process.platform !== "win32")(
+    "rejects nested junctions whose targets contain them",
+    () => {
+      for (const rootIsJunction of [false, true]) {
+        const root = useTmp();
+        const sourceBase = join(root, "source");
+        const destinationBase = join(root, "destination");
+        const target = rootIsJunction
+          ? join(root, "target")
+          : join(sourceBase, "skills");
+        const source = join(sourceBase, "skills");
+        const destination = join(destinationBase, "skills");
+        writeFixture(join(target, "keep.md"), "keep source");
+        symlinkSync(target, join(target, "loop"), "junction");
+        mkdirSync(sourceBase, { recursive: true });
+        if (rootIsJunction) {
+          symlinkSync(target, source, "junction");
+        }
+        mkdirSync(destinationBase, { recursive: true });
+
+        expect(() =>
+          mirrorSyncPath(
+            source,
+            destination,
+            sourceBase,
+            destinationBase,
+          )
+        ).toThrow("target contains the link");
+        expect(readFileSync(join(target, "keep.md"), "utf8")).toBe(
+          "keep source",
+        );
+        expect(existsSync(destination)).toBe(false);
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "win32")(
+    "rejects a destination junction whose target contains the junction",
+    () => {
+      const root = useTmp();
+      const sourceBase = join(root, "source");
+      const destinationBase = join(root, "destination");
+      const source = join(sourceBase, "skills");
+      const destination = join(destinationBase, "skills");
+      writeFixture(join(source, "new.md"), "new content");
+      writeFixture(join(destinationBase, "keep.md"), "keep destination");
+      symlinkSync(destinationBase, destination, "junction");
+
+      expect(() =>
+        mirrorSyncPath(
+          source,
+          destination,
+          sourceBase,
+          destinationBase,
+        )
+      ).toThrow("target contains the link");
+      expect(lstatSync(destination).isSymbolicLink()).toBe(true);
+      expect(readFileSync(join(destinationBase, "keep.md"), "utf8")).toBe(
+        "keep destination",
+      );
+      expect(existsSync(join(destinationBase, "new.md"))).toBe(false);
+    },
+  );
+
+  it("deletes the entire destination when the source is absent", () => {
+    const root = useTmp();
+    const missingFile = join(root, "missing-file");
+    const missingDirectory = join(root, "missing-directory");
+    const destinationFile = join(useTmp(), "AGENTS.md");
+    const destinationDirectory = join(useTmp(), "skills");
+
+    writeFixture(destinationFile, "stale");
+    writeFixture(join(destinationDirectory, "nested", "stale.md"), "stale");
+
+    mirrorSyncPath(missingFile, destinationFile);
+    mirrorSyncPath(missingDirectory, destinationDirectory);
+
+    expect(existsSync(destinationFile)).toBe(false);
+    expect(existsSync(destinationDirectory)).toBe(false);
+  });
+
+  it("is a no-op when source and destination resolve to the same path", () => {
+    const directory = join(useTmp(), "skills");
+    writeFixture(join(directory, "direct.md"), "keep me");
+    writeFixture(join(directory, "nested", "deep.md"), "keep me too");
+    mkdirSync(join(directory, "empty"), { recursive: true });
+    const before = requiredSnapshot(directory);
+
+    mirrorSyncPath(directory, join(directory, "."));
+
+    expect(readFileSync(join(directory, "direct.md"), "utf8")).toBe("keep me");
+    expect(readFileSync(join(directory, "nested", "deep.md"), "utf8")).toBe(
+      "keep me too",
+    );
+    expect(lstatSync(join(directory, "empty")).isDirectory()).toBe(true);
+    expect(requiredSnapshot(directory)).toEqual(before);
+  });
+
+  it("refuses to mirror a source that changed from its reviewed snapshot", () => {
+    const source = join(useTmp(), "AGENTS.md");
+    const destination = join(useTmp(), "AGENTS.md");
+    writeFixture(source, "reviewed source");
+    writeFixture(destination, "keep destination");
+    const reviewedSource = requiredSnapshot(source);
+    const reviewedDestination = requiredSnapshot(destination);
+    writeFileSync(source, "changed during execution", "utf8");
+
+    expect(() =>
+      mirrorSyncPath(
+        source,
+        destination,
+        undefined,
+        undefined,
+        {
+          source: reviewedSource,
+          destination: reviewedDestination,
+        },
+      )
+    ).toThrow("Source changed since review");
+    expect(readFileSync(destination, "utf8")).toBe("keep destination");
+  });
+
+  it("rejects a destination outside its declared base", () => {
+    const root = useTmp();
+    const sourceBase = join(root, "source");
+    const destinationBase = join(root, "destination");
+    const source = join(sourceBase, "AGENTS.md");
+    const destination = join(root, "outside", "AGENTS.md");
+    writeFixture(source, "new instructions");
+    writeFixture(destination, "keep existing instructions");
+    mkdirSync(destinationBase, { recursive: true });
+
+    expect(() =>
+      mirrorSyncPath(source, destination, sourceBase, destinationBase)
+    ).toThrow("outside its base");
+    expect(readFileSync(destination, "utf8")).toBe(
+      "keep existing instructions",
+    );
+  });
+
+  it("rejects a symlinked destination ancestor", () => {
+    const root = useTmp();
+    const sourceBase = join(root, "source");
+    const destinationBase = join(root, "destination");
+    const outside = join(root, "outside");
+    const source = join(sourceBase, "AGENTS.md");
+    const linkedDirectory = join(destinationBase, "linked");
+    const outsideDestination = join(outside, "AGENTS.md");
+    writeFixture(source, "new instructions");
+    writeFixture(outsideDestination, "keep existing instructions");
+    mkdirSync(destinationBase, { recursive: true });
+    symlinkSync(
+      outside,
+      linkedDirectory,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    expect(() =>
+      mirrorSyncPath(
+        source,
+        join(linkedDirectory, "AGENTS.md"),
+        sourceBase,
+        destinationBase,
+      )
+    ).toThrow("symlink ancestor");
+    expect(readFileSync(outsideDestination, "utf8")).toBe(
+      "keep existing instructions",
+    );
+  });
+
+  it("handles a leaf alias without mutating its target", () => {
+    const root = useTmp();
+    const source = join(root, "source");
+    const destination = join(root, "destination");
+    writeFixture(join(source, "agent.md"), "instructions");
+    symlinkSync(
+      source,
+      destination,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    const before = compareSyncPathSnapshots(
+      requiredSnapshot(source),
+      requiredSnapshot(destination),
+    );
+
+    if (process.platform === "win32") {
+      expect(before).toBe("unchanged");
+      expect(() => mirrorSyncPath(source, destination)).not.toThrow();
+      expect(readFileSync(join(source, "agent.md"), "utf8")).toBe(
+        "instructions",
+      );
+      return;
+    }
+
+    expect(before).toBe("modified");
+
+    expect(() => mirrorSyncPath(source, destination)).toThrow(
+      "aliased source and destination",
+    );
+    expect(
+      compareSyncPathSnapshots(
+        requiredSnapshot(source),
+        requiredSnapshot(destination),
+      ),
+    ).toBe("modified");
   });
 });

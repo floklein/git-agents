@@ -206,9 +206,9 @@ export function SetupScreen({ existingConfig, signal, onComplete }: Props) {
       >
         <BigText text="git-agents" font="tiny" />
         <Box flexDirection="column" alignItems="center" width={60} marginTop={1}>
-          <Text>Sync your AI agent skills with a remote git repo.</Text>
+          <Text>Sync portable AI harness files with a remote git repo.</Text>
           <Text dimColor>
-            Keeps your AI agents in sync across machines using git.
+            Keeps your authored instructions, agents, and skills in sync.
           </Text>
         </Box>
         <Box marginTop={2}>

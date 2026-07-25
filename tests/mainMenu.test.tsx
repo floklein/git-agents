@@ -7,9 +7,9 @@ describe("MainMenuScreen", () => {
     const view = render(<MainMenuScreen onNavigate={() => {}} />);
     const frame = view.lastFrame();
 
-    expect(frame).toContain("Sync your AI agent directories");
+    expect(frame).toContain("Sync portable AI harness files");
     expect(frame).toContain("❯ Pull");
-    expect(frame).toContain("Download agents from remote to local");
+    expect(frame).toContain("Download harness files to this machine");
 
     view.unmount();
   });

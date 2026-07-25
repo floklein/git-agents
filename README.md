@@ -1,12 +1,12 @@
 # git-agents
 
-A terminal UI tool to sync your AI agents and skills across machines using git.
+A terminal UI tool to sync portable AI coding harness files across machines using git.
 
-Supports **OpenCode**, **Claude Code**, **Codex**, **Cursor**, and [41 more](#supported-agents).
+Supports five harnesses: **Claude Code**, **Codex**, **Cursor**, **Gemini CLI**, and **OpenCode**.
 
 ## What it does
 
-`ga` keeps your AI agent directories in sync with a remote git repository, so your custom skills follow you everywhere.
+`ga` syncs only your authored agents, instructions, commands, rules, and skills with a remote git repository. Machine-specific and generated state stays local.
 
 ## Quick start
 
@@ -34,8 +34,8 @@ npm link   # makes `ga` and `git-agents` available globally
 
 ```bash
 ga              # interactive TUI
-ga pull         # pull remote agents to local
-ga push         # push local agents to remote
+ga pull         # pull remote harness files to local
+ga push         # push local harness files to remote
 ```
 
 ## Features
@@ -54,18 +54,22 @@ On first launch, `ga` walks you through setup:
 Both operations show a comparison summary before doing anything:
 
 ```
-  Remote: 12 skills        Local: 10 skills
+  Comparison                         Harness 1/5
+  Remote: 12 files         Local: 10 files
 
-  + new-skill-a
-  + new-skill-b
-  ~ updated-skill
-
-  8 skills unchanged
+  Claude Code
+  + .claude/agents
+  ~ .claude/CLAUDE.md
 
   Confirm pull? [No, cancel] [Yes, pull]
+  ←/→ review harnesses
 ```
 
-**No is always the default.** Nothing happens unless you explicitly confirm.
+**No is always the default**. Nothing happens unless you explicitly confirm.
+
+Use Left/Right or Page Up/Page Down to review every populated harness before confirming.
+
+After confirmation, changed paths are mirrored from the source side. The remote `.git-agents-sync.json` manifest records paths initialized by a reviewed push. An absent path is treated as a deletion only after initialization, so upgrading an older remote cannot erase newly supported local files. Push commits are limited to the listed harness paths and this manifest. Unrelated local commits are refused, while a failed scoped sync push can be retried safely.
 
 ### Edit config
 
@@ -78,52 +82,20 @@ Select **Edit Config** from the main menu to reconfigure your remote at any time
 - [git](https://git-scm.com)
 - [GitHub CLI](https://cli.github.com) *(only if using the GH CLI remote option)*
 
-## Supported agents
+## Supported harnesses
 
-| Agent | Global path |
-|-------|-------------|
-| Amp | `~/.config/agents/` |
-| Antigravity | `~/.gemini/antigravity/` |
-| Augment | `~/.augment/` |
-| IBM Bob | `~/.bob/` |
-| Claude Code | `~/.claude/` |
-| Cline | `~/.agents/` |
-| CodeBuddy | `~/.codebuddy/` |
-| Codex | `~/.codex/` |
-| Command Code | `~/.commandcode/` |
-| Continue | `~/.continue/` |
-| Cortex Code | `~/.snowflake/cortex/` |
-| Crush | `~/.config/crush/` |
-| Cursor | `~/.cursor/` |
-| Deep Agents | `~/.deepagents/agent/` |
-| Droid | `~/.factory/` |
-| Firebender | `~/.firebender/` |
-| Gemini CLI | `~/.gemini/` |
-| GitHub Copilot | `~/.copilot/` |
-| Goose | `~/.config/goose/` |
-| iFlow CLI | `~/.iflow/` |
-| Junie | `~/.junie/` |
-| Kilo Code | `~/.kilocode/` |
-| Kimi Code CLI | `~/.config/agents/` |
-| Kiro CLI | `~/.kiro/` |
-| Kode | `~/.kode/` |
-| MCPJam | `~/.mcpjam/` |
-| Mistral Vibe | `~/.vibe/` |
-| Mux | `~/.mux/` |
-| OpenClaw | `~/.openclaw/` |
-| OpenCode | `~/.config/opencode/` |
-| OpenHands | `~/.openhands/` |
-| Pi | `~/.pi/agent/` |
-| Pochi | `~/.pochi/` |
-| Qoder | `~/.qoder/` |
-| Qwen Code | `~/.qwen/` |
-| Replit | `~/.config/agents/` |
-| Roo Code | `~/.roo/` |
-| Trae | `~/.trae/` |
-| Trae CN | `~/.trae-cn/` |
-| Universal | `~/.config/agents/` |
-| Warp | `~/.agents/` |
-| Windsurf | `~/.codeium/windsurf/` |
-| Zencoder | `~/.zencoder/` |
-| Neovate | `~/.neovate/` |
-| AdaL | `~/.adal/` |
+Only the paths below are synced. A trailing `/` means the full directory tree. Files matched by repository or global Git ignore rules are still included inside these explicitly selected paths.
+
+| Harness | Synced paths |
+|---------|--------------|
+| Claude Code | `~/.claude/CLAUDE.md`<br>`~/.claude/agents/`<br>`~/.claude/commands/`<br>`~/.claude/rules/`<br>`~/.claude/skills/` |
+| Codex | `~/.codex/AGENTS.md`<br>`~/.codex/agents/`<br>`~/.agents/skills/` |
+| Cursor | `~/.cursor/agents/`<br>`~/.cursor/commands/`<br>`~/.cursor/rules/`<br>`~/.cursor/skills/` |
+| Gemini CLI | `~/.gemini/GEMINI.md`<br>`~/.gemini/agents/`<br>`~/.gemini/commands/`<br>`~/.gemini/skills/` |
+| OpenCode | `~/.config/opencode/AGENTS.md`<br>`~/.config/opencode/agents/`<br>`~/.config/opencode/commands/`<br>`~/.config/opencode/skills/` |
+
+Generated state, general settings, authentication data, caches, sessions, and managed installs outside the paths above are excluded. Everything inside a selected directory is treated as portable content, so keep machine-specific files outside it.
+
+On Windows, a selected leaf directory junction syncs the contents of its target. Pulling into an existing junction updates that target without replacing the junction. POSIX executable state is preserved for synced files.
+
+Paths committed by older releases remain in the remote checkout for safe manual cleanup. Current sync ignores them and does not copy, stage, or commit them.
