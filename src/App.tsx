@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useKeyboard } from "@opentui/react";
+import { useEffect, useRef, useState } from "react";
+import { Box, useApp, useInput, useWindowSize } from "ink";
 import { MainMenuScreen } from "./screens/MainMenuScreen";
 import { SyncScreen } from "./screens/SyncScreen";
 import { SetupScreen } from "./screens/SetupScreen";
@@ -13,35 +13,50 @@ type Props = {
 export function App({ initialScreen, initialConfig }: Props) {
   const [screen, setScreen] = useState<Screen>(initialScreen);
   const [config, setConfig] = useState<Config | undefined>(initialConfig);
+  const abortController = useRef(new AbortController());
+  const { exit } = useApp();
+  const { rows } = useWindowSize();
 
-  useKeyboard((key) => {
-    if (key.ctrl && key.name === "c") process.exit(0);
+  useEffect(() => {
+    return () => abortController.current.abort();
+  }, []);
+
+  useInput((input, key) => {
+    if (key.ctrl && input === "c") {
+      abortController.current.abort();
+      process.exitCode = 130;
+      exit();
+    }
   });
 
+  let content;
+
   if (screen.id === "setup") {
-    return (
+    content = (
       <SetupScreen
         existingConfig={screen.existingConfig ?? config}
+        signal={abortController.current.signal}
         onComplete={(newConfig) => {
           setConfig(newConfig);
           setScreen({ id: "main" });
         }}
       />
     );
-  }
-
-  if (screen.id === "sync") {
-    return (
+  } else if (screen.id === "sync") {
+    content = (
       <SyncScreen
         mode={screen.mode}
+        signal={abortController.current.signal}
         onBack={() => setScreen({ id: "main" })}
       />
     );
+  } else {
+    content = <MainMenuScreen onNavigate={(next) => setScreen(next)} />;
   }
 
   return (
-    <MainMenuScreen
-      onNavigate={(next) => setScreen(next)}
-    />
+    <Box flexDirection="column" height={rows}>
+      {content}
+    </Box>
   );
 }
