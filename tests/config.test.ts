@@ -1,8 +1,14 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "fs";
 import { join } from "path";
-import { homedir, tmpdir } from "os";
-import { readConfig, writeConfig, getSyncDirForAgent, CONFIG_DIR } from "../src/utils/config";
+import { tmpdir } from "os";
+import {
+  readConfig,
+  writeConfig,
+  resolveSyncPath,
+  getLocalSyncPath,
+  getRemoteSyncPath,
+} from "../src/utils/config";
 
 let tmpDirs: string[] = [];
 
@@ -84,16 +90,63 @@ describe("writeConfig", () => {
   });
 });
 
-describe("getSyncDirForAgent", () => {
-  it("returns path under CONFIG_DIR relative to homedir", () => {
-    const agentPath = join(homedir(), ".claude");
-    const result = getSyncDirForAgent(agentPath);
-    expect(result).toBe(join(CONFIG_DIR, ".claude"));
+describe("resolveSyncPath", () => {
+  it("maps forward-slash nested paths under the provided base", () => {
+    const { dir } = useTmpConfig();
+
+    expect(resolveSyncPath(dir, ".config/opencode/skills")).toBe(
+      join(dir, ".config", "opencode", "skills"),
+    );
   });
 
-  it("preserves nested paths", () => {
-    const agentPath = join(homedir(), ".config", "agents");
-    const result = getSyncDirForAgent(agentPath);
-    expect(result).toBe(join(CONFIG_DIR, ".config", "agents"));
+  it("maps Windows-style nested separators safely", () => {
+    const { dir } = useTmpConfig();
+
+    expect(resolveSyncPath(dir, ".gemini\\commands\\review")).toBe(
+      join(dir, ".gemini", "commands", "review"),
+    );
+  });
+
+  it("rejects absolute paths", () => {
+    const { dir } = useTmpConfig();
+
+    expect(() => resolveSyncPath(dir, join(dir, ".claude", "skills"))).toThrow();
+    expect(() => resolveSyncPath(dir, "/outside/skills")).toThrow();
+  });
+
+  it("rejects traversal paths", () => {
+    const { dir } = useTmpConfig();
+
+    expect(() => resolveSyncPath(dir, "../outside")).toThrow();
+    expect(() => resolveSyncPath(dir, ".claude/../../outside")).toThrow();
+    expect(() => resolveSyncPath(dir, ".claude\\..\\outside")).toThrow();
+  });
+
+  it("rejects empty and malformed paths", () => {
+    const { dir } = useTmpConfig();
+
+    expect(() => resolveSyncPath(dir, "")).toThrow();
+    expect(() => resolveSyncPath(dir, "   ")).toThrow();
+    expect(() => resolveSyncPath(dir, ".claude//skills")).toThrow();
+  });
+});
+
+describe("getLocalSyncPath", () => {
+  it("resolves a manifest path under the selected home directory", () => {
+    const { dir } = useTmpConfig();
+
+    expect(getLocalSyncPath(".claude/CLAUDE.md", dir)).toBe(
+      join(dir, ".claude", "CLAUDE.md"),
+    );
+  });
+});
+
+describe("getRemoteSyncPath", () => {
+  it("preserves the home-relative layout under the sync repository", () => {
+    const { dir } = useTmpConfig();
+
+    expect(getRemoteSyncPath(".agents/skills", dir)).toBe(
+      join(dir, ".agents", "skills"),
+    );
   });
 });

@@ -11,19 +11,13 @@ export type Config = z.infer<typeof ConfigSchema>;
 
 export type RemoteType = Config["remote"];
 
-export type AgentEntry = { name: string; fileCount: number; contentHash: string };
-
-export type AgentsDiff = {
-  added: AgentEntry[];
-  removed: AgentEntry[];
-  modified: AgentEntry[];
-  unchanged: AgentEntry[];
+export type SyncPathSnapshot = {
+  kind: "file" | "directory" | "symlink";
+  fileCount: number;
+  contentHash: string;
 };
 
-export type FolderDiff = {
-  folder: string;
-  diff: AgentsDiff;
-};
+export type SyncPathStatus = "added" | "removed" | "modified" | "unchanged";
 
 export type Screen =
   | { id: "setup"; existingConfig?: Config }

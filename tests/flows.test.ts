@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, writeFileSync, rmSync, existsSync } from "fs";
-import { join } from "path";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join } from "path";
 import { tmpdir } from "os";
 import {
   runGhPrecheck,
@@ -10,6 +17,7 @@ import {
   runGitUrlValidation,
   runSyncLoad,
   runSyncExecute,
+  SYNC_MANIFEST_FILE,
   type AgentDiffEntry,
 } from "../src/utils/flows";
 import type { AgentDef } from "../src/utils/agentDefs";
@@ -228,148 +236,676 @@ describe("runGitUrlValidation", () => {
 
 // ---- runSyncLoad ----
 
+function fixtureFile(root: string, relativePath: string, content: string): string {
+  const target = join(root, ...relativePath.split("/"));
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, content);
+  return target;
+}
+
+function testAgent(syncPaths: string[]): AgentDef {
+  return {
+    id: "test-agent",
+    name: "Test Agent",
+    syncPaths,
+  };
+}
+
+function fixtureManifest(root: string, paths: string[]): string {
+  return fixtureFile(
+    root,
+    SYNC_MANIFEST_FILE,
+    `${JSON.stringify({ version: 1, paths }, null, 2)}\n`,
+  );
+}
+
+function loadedDiffs(
+  result: Awaited<ReturnType<typeof runSyncLoad>>,
+): AgentDiffEntry[] {
+  expect(result.type).toBe("ok");
+  if (result.type !== "ok") {
+    throw new Error(result.message);
+  }
+  return result.agentDiffs;
+}
+
 describe("runSyncLoad", () => {
   it("returns error when gitPull fails", async () => {
-    const result = await runSyncLoad("pull", [], "/some/dir", {
+    const configDir = useTmp();
+    const homeDir = useTmp();
+    const result = await runSyncLoad("pull", [], configDir, {
       gitPull: fail("connection refused"),
-    });
+    }, homeDir);
+
     expect(result.type).toBe("error");
-    expect((result as any).message).toContain("Failed to pull remote");
+    if (result.type === "error") {
+      expect(result.message).toContain("Failed to pull remote");
+    }
   });
 
-  it("returns empty diffs when no agent directories exist", async () => {
-    const result = await runSyncLoad("pull", [], "/some/dir", {
+  it("returns empty diffs when no harnesses are configured", async () => {
+    const configDir = useTmp();
+    const homeDir = useTmp();
+    const result = await runSyncLoad("pull", [], configDir, {
       gitPull: ok(),
-    });
-    expect(result.type).toBe("ok");
-    expect((result as any).agentDiffs).toEqual([]);
+    }, homeDir);
+
+    expect(loadedDiffs(result)).toEqual([]);
   });
 
-  it("skips agent entries where both local and remote dirs are empty", async () => {
-    const base = useTmp();
-    const agentDef: AgentDef = { id: "test-agent", name: "Test Agent", globalPath: base };
+  it("detects a root file and direct files inside a selected directory", async () => {
+    const configDir = useTmp();
+    const homeDir = useTmp();
+    const def = testAgent([
+      ".claude/CLAUDE.md",
+      ".claude/agents",
+    ]);
+    fixtureFile(configDir, ".claude/CLAUDE.md", "remote instructions");
+    fixtureFile(configDir, ".claude/agents/reviewer.md", "review agent");
 
-    const result = await runSyncLoad("pull", [agentDef], "/config/dir", {
+    const result = await runSyncLoad("pull", [def], configDir, {
       gitPull: ok(),
-    });
+    }, homeDir);
+    const diffs = loadedDiffs(result);
 
-    expect(result.type).toBe("ok");
-    expect((result as any).agentDiffs).toEqual([]);
-  });
-
-  it("includes agent entries when local dir has skills", async () => {
-    const base = useTmp();
-    mkdirSync(join(base, "skills", "my-skill"), { recursive: true });
-
-    const agentDef: AgentDef = { id: "test-agent", name: "Test Agent", globalPath: base };
-
-    const result = await runSyncLoad("pull", [agentDef], "/config/dir", {
-      gitPull: ok(),
-    });
-
-    expect(result.type).toBe("ok");
-    const diffs = (result as any).agentDiffs as AgentDiffEntry[];
     expect(diffs).toHaveLength(1);
-    expect(diffs[0]!.defs[0]!.id).toBe("test-agent");
-    expect(diffs[0]!.remoteCount).toBe(0);
+    expect(diffs[0]!.def).toEqual(def);
+    expect(diffs[0]!.remoteCount).toBe(2);
+    expect(diffs[0]!.localCount).toBe(0);
+    expect(diffs[0]!.pathDiffs.map((diff) => ({
+      path: diff.path,
+      status: diff.status,
+      kind: diff.remote?.kind,
+      fileCount: diff.remote?.fileCount,
+    }))).toEqual([
+      {
+        path: ".claude/CLAUDE.md",
+        status: "added",
+        kind: "file",
+        fileCount: 1,
+      },
+      {
+        path: ".claude/agents",
+        status: "added",
+        kind: "directory",
+        fileCount: 1,
+      },
+    ]);
+  });
+
+  it("detects equal-size content modifications", async () => {
+    const configDir = useTmp();
+    const homeDir = useTmp();
+    const def = testAgent([".gemini/GEMINI.md"]);
+    fixtureFile(homeDir, ".gemini/GEMINI.md", "fresh");
+    fixtureFile(configDir, ".gemini/GEMINI.md", "stale");
+
+    const result = await runSyncLoad("push", [def], configDir, {
+      gitPull: ok(),
+    }, homeDir);
+    const diffs = loadedDiffs(result);
+
+    expect(diffs).toHaveLength(1);
+    expect(diffs[0]!.pathDiffs).toHaveLength(1);
+    expect(diffs[0]!.pathDiffs[0]!.status).toBe("modified");
     expect(diffs[0]!.localCount).toBe(1);
-    expect(diffs[0]!.folderDiffs).toHaveLength(1);
-    expect(diffs[0]!.folderDiffs[0]!.folder).toBe("skills");
+    expect(diffs[0]!.remoteCount).toBe(1);
+    expect(diffs[0]!.pathDiffs[0]!.local!.contentHash)
+      .not.toBe(diffs[0]!.pathDiffs[0]!.remote!.contentHash);
   });
 
-  it("groups agents sharing the same globalPath into one entry", async () => {
-    const base = useTmp();
-    mkdirSync(join(base, "skills", "my-skill"), { recursive: true });
+  it("ignores paths that are not selected by the harness", async () => {
+    const configDir = useTmp();
+    const homeDir = useTmp();
+    const def = testAgent([".claude/skills"]);
+    fixtureFile(homeDir, ".claude/skills/review/SKILL.md", "review");
+    fixtureFile(homeDir, ".claude/cache/session.json", "private state");
 
-    const def1: AgentDef = { id: "agent-a", name: "Agent A", globalPath: base };
-    const def2: AgentDef = { id: "agent-b", name: "Agent B", globalPath: base };
-
-    const result = await runSyncLoad("pull", [def1, def2], "/config/dir", {
+    const result = await runSyncLoad("push", [def], configDir, {
       gitPull: ok(),
-    });
+    }, homeDir);
+    const diffs = loadedDiffs(result);
 
-    expect(result.type).toBe("ok");
-    const diffs = (result as any).agentDiffs as AgentDiffEntry[];
     expect(diffs).toHaveLength(1);
-    expect(diffs[0]!.defs).toHaveLength(2);
-    expect(diffs[0]!.defs.map((d: AgentDef) => d.id)).toEqual(["agent-a", "agent-b"]);
+    expect(diffs[0]!.pathDiffs.map((diff) => diff.path)).toEqual([
+      ".claude/skills",
+    ]);
+    expect(diffs[0]!.localCount).toBe(1);
+  });
+
+  it.each([
+    {
+      harness: "Claude Code",
+      legacyPath: ".claude/skills/review/SKILL.md",
+      currentPath: ".claude/CLAUDE.md",
+      syncPaths: [
+        ".claude/CLAUDE.md",
+        ".claude/agents",
+        ".claude/rules",
+        ".claude/skills",
+        ".claude/commands",
+      ],
+    },
+    {
+      harness: "Gemini CLI",
+      legacyPath: ".gemini/commands/review.toml",
+      currentPath: ".gemini/GEMINI.md",
+      syncPaths: [
+        ".gemini/GEMINI.md",
+        ".gemini/agents",
+        ".gemini/commands",
+        ".gemini/skills",
+      ],
+    },
+    {
+      harness: "OpenCode",
+      legacyPath: ".config/opencode/commands/review.md",
+      currentPath: ".config/opencode/AGENTS.md",
+      syncPaths: [
+        ".config/opencode/AGENTS.md",
+        ".config/opencode/agents",
+        ".config/opencode/commands",
+        ".config/opencode/skills",
+      ],
+    },
+  ])(
+    "preserves newly selected local $harness paths when pulling a legacy remote",
+    async ({ legacyPath, currentPath, syncPaths }) => {
+      const configDir = useTmp();
+      const homeDir = useTmp();
+      const def = testAgent(syncPaths);
+      fixtureFile(configDir, legacyPath, "legacy remote");
+      const localCurrent = fixtureFile(homeDir, currentPath, "keep local");
+
+      const loadResult = await runSyncLoad("pull", [def], configDir, {
+        gitPull: ok(),
+      }, homeDir);
+      const diffs = loadedDiffs(loadResult);
+
+      expect(diffs).toHaveLength(1);
+      expect(diffs[0]!.pathDiffs.map((diff) => diff.path))
+        .not.toContain(currentPath);
+
+      const executeResult = await runSyncExecute(
+        "pull",
+        diffs,
+        configDir,
+        { gitAddCommitPush: ok() },
+      );
+
+      expect(executeResult.type).toBe("ok");
+      expect(readFileSync(localCurrent, "utf8")).toBe("keep local");
+    },
+  );
+
+  it("treats an initialized missing path as an explicit tombstone", async () => {
+    const configDir = useTmp();
+    const homeDir = useTmp();
+    const syncPaths = [
+      ".claude/CLAUDE.md",
+      ".claude/skills",
+    ];
+    const def = testAgent(syncPaths);
+    fixtureManifest(configDir, syncPaths);
+    fixtureFile(configDir, ".claude/skills/review/SKILL.md", "review");
+    const localInstructions = fixtureFile(
+      homeDir,
+      ".claude/CLAUDE.md",
+      "delete after initialization",
+    );
+
+    const loadResult = await runSyncLoad("pull", [def], configDir, {
+      gitPull: ok(),
+    }, homeDir);
+    const diffs = loadedDiffs(loadResult);
+
+    expect(diffs[0]!.pathDiffs.map((diff) => [diff.path, diff.status]))
+      .toEqual([
+        [".claude/CLAUDE.md", "removed"],
+        [".claude/skills", "added"],
+      ]);
+
+    const executeResult = await runSyncExecute(
+      "pull",
+      diffs,
+      configDir,
+      { gitAddCommitPush: ok() },
+    );
+
+    expect(executeResult.type).toBe("ok");
+    expect(existsSync(localInstructions)).toBe(false);
   });
 });
 
 // ---- runSyncExecute ----
 
 describe("runSyncExecute (pull)", () => {
-  it("returns ok with pull message and does not call gitAddCommitPush", async () => {
-    let pushCalled = false;
+  it("copies a root file and directory exactly, including stale deletion", async () => {
+    const configDir = useTmp();
+    const homeDir = useTmp();
+    const def = testAgent([
+      ".claude/CLAUDE.md",
+      ".claude/agents",
+    ]);
+    const localInstructions = fixtureFile(
+      homeDir,
+      ".claude/CLAUDE.md",
+      "local instructions",
+    );
+    const localStaleAgent = fixtureFile(
+      homeDir,
+      ".claude/agents/stale.md",
+      "stale",
+    );
+    fixtureFile(configDir, ".claude/CLAUDE.md", "remote instructions");
+    fixtureFile(configDir, ".claude/agents/reviewer.md", "review agent");
 
-    const result = await runSyncExecute("pull", [], "/config/dir", {
+    const loadResult = await runSyncLoad("pull", [def], configDir, {
+      gitPull: ok(),
+    }, homeDir);
+    const diffs = loadedDiffs(loadResult);
+    let pushCalled = false;
+    const result = await runSyncExecute("pull", diffs, configDir, {
       gitAddCommitPush: async () => { pushCalled = true; return { ok: true }; },
     });
 
     expect(result.type).toBe("ok");
-    expect((result as any).message).toContain("Pull complete");
+    if (result.type === "ok") {
+      expect(result.message).toContain("Pull complete");
+    }
     expect(pushCalled).toBe(false);
-  });
-
-  it("copies agents from syncDir to globalPath for pull", async () => {
-    const result = await runSyncExecute("pull", [], "/config/dir", {
-      gitAddCommitPush: ok(),
-    });
-
-    expect(result.type).toBe("ok");
+    expect(readFileSync(localInstructions, "utf8")).toBe("remote instructions");
+    expect(existsSync(localStaleAgent)).toBe(false);
+    expect(
+      readFileSync(
+        join(homeDir, ".claude", "agents", "reviewer.md"),
+        "utf8",
+      ),
+    ).toBe("review agent");
   });
 });
 
 describe("runSyncExecute (push)", () => {
-  it("calls gitAddCommitPush and returns ok on success", async () => {
+  it("copies selected root and direct files without copying ignored state", async () => {
+    const configDir = useTmp();
+    const homeDir = useTmp();
+    const def = testAgent([
+      ".gemini/GEMINI.md",
+      ".gemini/commands",
+    ]);
+    fixtureFile(homeDir, ".gemini/GEMINI.md", "fresh");
+    fixtureFile(homeDir, ".gemini/commands/review.toml", "prompt = 'review'");
+    fixtureFile(homeDir, ".gemini/cache/session.json", "private state");
+    fixtureFile(configDir, ".gemini/GEMINI.md", "stale");
+    fixtureFile(configDir, ".gemini/commands/obsolete.toml", "obsolete");
+
+    const loadResult = await runSyncLoad("push", [def], configDir, {
+      gitPull: ok(),
+    }, homeDir);
+    const diffs = loadedDiffs(loadResult);
     let pushedDir = "";
     let pushedMsg = "";
-
-    const result = await runSyncExecute("push", [], "/config/dir", {
-      gitAddCommitPush: async (dir, msg) => {
+    let pushedPaths: string[] = [];
+    const result = await runSyncExecute("push", [...diffs, ...diffs], configDir, {
+      gitAddCommitPush: async (dir, msg, paths) => {
         pushedDir = dir;
         pushedMsg = msg;
+        pushedPaths = paths;
         return { ok: true };
       },
     });
 
     expect(result.type).toBe("ok");
-    expect((result as any).message).toContain("Push complete");
-    expect(pushedDir).toBe("/config/dir");
-    expect(pushedMsg).toMatch(/^sync: update agents/);
+    if (result.type === "ok") {
+      expect(result.message).toContain("Push complete");
+    }
+    expect(pushedDir).toBe(configDir);
+    expect(pushedMsg).toMatch(/^sync: update harness files/);
+    expect(pushedPaths).toEqual([
+      ".gemini/GEMINI.md",
+      ".gemini/commands",
+      SYNC_MANIFEST_FILE,
+    ]);
+    expect(
+      readFileSync(join(configDir, ".gemini", "GEMINI.md"), "utf8"),
+    ).toBe("fresh");
+    expect(
+      readFileSync(
+        join(configDir, ".gemini", "commands", "review.toml"),
+        "utf8",
+      ),
+    ).toBe("prompt = 'review'");
+    expect(
+      existsSync(join(configDir, ".gemini", "commands", "obsolete.toml")),
+    ).toBe(false);
+    expect(existsSync(join(configDir, ".gemini", "cache"))).toBe(false);
   });
 
-  it("returns ok when gitAddCommitPush reports nothing to commit", async () => {
-    const result = await runSyncExecute("push", [], "/config/dir", {
-      gitAddCommitPush: async () => ({ ok: true, output: "Nothing to commit" }),
+  it("deletes a destination-only target when the source has another selected path", async () => {
+    const configDir = useTmp();
+    const homeDir = useTmp();
+    const def = testAgent([
+      ".codex/AGENTS.md",
+      ".codex/agents",
+    ]);
+    fixtureFile(homeDir, ".codex/AGENTS.md", "shared instructions");
+    fixtureFile(configDir, ".codex/AGENTS.md", "shared instructions");
+    const staleRemoteAgents = join(configDir, ".codex", "agents");
+    fixtureFile(configDir, ".codex/agents/legacy.md", "legacy");
+    fixtureManifest(configDir, def.syncPaths);
+
+    const loadResult = await runSyncLoad("push", [def], configDir, {
+      gitPull: ok(),
+    }, homeDir);
+    const diffs = loadedDiffs(loadResult);
+
+    expect(diffs).toHaveLength(1);
+    expect(diffs[0]!.pathDiffs.map((diff) => [diff.path, diff.status]))
+      .toEqual([
+        [".codex/AGENTS.md", "unchanged"],
+        [".codex/agents", "removed"],
+      ]);
+
+    let pushedPaths: string[] = [];
+    const result = await runSyncExecute("push", diffs, configDir, {
+      gitAddCommitPush: async (_dir, _message, paths) => {
+        pushedPaths = paths;
+        return { ok: true };
+      },
     });
 
     expect(result.type).toBe("ok");
+    expect(pushedPaths).toEqual([
+      ".codex/AGENTS.md",
+      ".codex/agents",
+      SYNC_MANIFEST_FILE,
+    ]);
+    expect(existsSync(join(configDir, ".codex", "AGENTS.md"))).toBe(true);
+    expect(existsSync(staleRemoteAgents)).toBe(false);
+  });
+
+  it("does not let shared skills activate deletions in the Codex root", async () => {
+    const configDir = useTmp();
+    const homeDir = useTmp();
+    const def = testAgent([
+      ".codex/AGENTS.md",
+      ".codex/agents",
+      ".agents/skills",
+    ]);
+    fixtureFile(homeDir, ".agents/skills/review/SKILL.md", "review");
+    const remoteInstructions = fixtureFile(
+      configDir,
+      ".codex/AGENTS.md",
+      "remote only",
+    );
+
+    const loadResult = await runSyncLoad("push", [def], configDir, {
+      gitPull: ok(),
+    }, homeDir);
+    const diffs = loadedDiffs(loadResult);
+
+    expect(diffs).toHaveLength(1);
+    expect(diffs[0]!.pathDiffs.map((diff) => diff.path)).toEqual([
+      ".agents/skills",
+    ]);
+
+    const result = await runSyncExecute("push", diffs, configDir, {
+      gitAddCommitPush: ok(),
+    });
+
+    expect(result.type).toBe("ok");
+    expect(existsSync(remoteInstructions)).toBe(true);
+  });
+
+  it("records only reviewed paths in the manifest on the first successful push", async () => {
+    const configDir = useTmp();
+    const homeDir = useTmp();
+    const def = testAgent([
+      ".claude/CLAUDE.md",
+      ".claude/agents",
+      ".claude/rules",
+    ]);
+    fixtureFile(homeDir, ".claude/CLAUDE.md", "instructions");
+
+    const loadResult = await runSyncLoad("push", [def], configDir, {
+      gitPull: ok(),
+    }, homeDir);
+    const diffs = loadedDiffs(loadResult);
+    let pushedPaths: string[] = [];
+
+    const executeResult = await runSyncExecute(
+      "push",
+      diffs,
+      configDir,
+      {
+        gitAddCommitPush: async (_dir, _message, paths) => {
+          pushedPaths = paths;
+          return { ok: true };
+        },
+      },
+    );
+
+    expect(executeResult.type).toBe("ok");
+    expect(pushedPaths).toEqual([
+      ".claude/CLAUDE.md",
+      SYNC_MANIFEST_FILE,
+    ]);
+    expect(
+      JSON.parse(
+        readFileSync(join(configDir, SYNC_MANIFEST_FILE), "utf8"),
+      ),
+    ).toEqual({
+      version: 1,
+      paths: [
+        ".claude/CLAUDE.md",
+      ],
+    });
+  });
+
+  it("rejects a symlinked manifest without writing through it", async () => {
+    const configDir = useTmp();
+    const homeDir = useTmp();
+    const outsideDir = useTmp();
+    const outsideManifest = join(outsideDir, "outside.json");
+    const def = testAgent([".claude/CLAUDE.md"]);
+    fixtureFile(homeDir, ".claude/CLAUDE.md", "instructions");
+    const loadResult = await runSyncLoad("push", [def], configDir, {
+      gitPull: ok(),
+    }, homeDir);
+    const diffs = loadedDiffs(loadResult);
+    symlinkSync(
+      outsideManifest,
+      join(configDir, SYNC_MANIFEST_FILE),
+      "file",
+    );
+    let pushCalled = false;
+
+    const executeResult = await runSyncExecute(
+      "push",
+      diffs,
+      configDir,
+      {
+        gitAddCommitPush: async () => {
+          pushCalled = true;
+          return { ok: true };
+        },
+      },
+    );
+
+    expect(executeResult.type).toBe("error");
+    if (executeResult.type === "error") {
+      expect(executeResult.message).toContain("must be a regular file");
+    }
+    expect(pushCalled).toBe(false);
+    expect(existsSync(outsideManifest)).toBe(false);
+    expect(
+      existsSync(join(configDir, ".claude", "CLAUDE.md")),
+    ).toBe(false);
+  });
+
+  it("returns ok when gitAddCommitPush reports nothing to commit", async () => {
+    const configDir = useTmp();
+    let pushedPaths = ["not-called"];
+    const result = await runSyncExecute("push", [], configDir, {
+      gitAddCommitPush: async (_dir, _message, paths) => {
+        pushedPaths = paths;
+        return { ok: true, output: "Nothing to commit" };
+      },
+    });
+
+    expect(result.type).toBe("ok");
+    expect(pushedPaths).toEqual([]);
   });
 
   it("returns error when gitAddCommitPush fails", async () => {
-    const result = await runSyncExecute("push", [], "/config/dir", {
+    const configDir = useTmp();
+    const result = await runSyncExecute("push", [], configDir, {
       gitAddCommitPush: fail("remote rejected"),
     });
 
     expect(result.type).toBe("error");
-    expect((result as any).message).toContain("Failed to push");
-    expect((result as any).message).toContain("remote rejected");
+    if (result.type === "error") {
+      expect(result.message).toContain("Failed to push");
+      expect(result.message).toContain("remote rejected");
+    }
   });
 
-  it("returns error when copying agents throws", async () => {
+  it("returns error when mirroring a selected path throws", async () => {
+    const temp = useTmp();
+    const source = fixtureFile(temp, "source.md", "source");
+    const blockingFile = fixtureFile(temp, "blocking-file", "blocker");
+    let pushCalled = false;
     const fakeEntry: AgentDiffEntry = {
-      defs: [{ id: "x", name: "X", globalPath: "/nonexistent/path/that/does/not/exist" }],
-      folderDiffs: [{ folder: "skills", diff: { added: [], removed: [], modified: [], unchanged: [] } }],
+      def: testAgent([".claude/CLAUDE.md"]),
+      pathDiffs: [{
+        path: ".claude/CLAUDE.md",
+        localBasePath: temp,
+        remoteBasePath: temp,
+        localPath: source,
+        remotePath: join(blockingFile, "CLAUDE.md"),
+        status: "added",
+        local: {
+          kind: "file",
+          fileCount: 1,
+          contentHash: "local",
+        },
+        remote: null,
+      }],
       remoteCount: 0,
-      localCount: 0,
+      localCount: 1,
     };
 
-    const result = await runSyncExecute("push", [fakeEntry], "/config/dir", {
-      gitAddCommitPush: ok(),
+    const result = await runSyncExecute("push", [fakeEntry], temp, {
+      gitAddCommitPush: async () => {
+        pushCalled = true;
+        return { ok: true };
+      },
     });
 
     expect(result.type).toBe("error");
-    expect((result as any).message).toContain("Failed to copy agents");
+    if (result.type === "error") {
+      expect(result.message).toContain("Failed to sync paths");
+    }
+    expect(pushCalled).toBe(false);
   });
 });
+
+describe("runSyncExecute stale review safety", () => {
+  it.each([
+    { mode: "pull" as const, changedSide: "source" as const },
+    { mode: "pull" as const, changedSide: "destination" as const },
+    { mode: "push" as const, changedSide: "source" as const },
+    { mode: "push" as const, changedSide: "destination" as const },
+  ])(
+    "does not mutate any path when the $changedSide changes before $mode",
+    async ({ mode, changedSide }) => {
+      const configDir = useTmp();
+      const homeDir = useTmp();
+      const def = testAgent([
+        ".claude/CLAUDE.md",
+        ".claude/agents",
+      ]);
+      const localInstructions = fixtureFile(
+        homeDir,
+        ".claude/CLAUDE.md",
+        "local instructions",
+      );
+      const remoteInstructions = fixtureFile(
+        configDir,
+        ".claude/CLAUDE.md",
+        "remote instructions",
+      );
+      const localAgent = fixtureFile(
+        homeDir,
+        ".claude/agents/reviewer.md",
+        "local agent",
+      );
+      const remoteAgent = fixtureFile(
+        configDir,
+        ".claude/agents/reviewer.md",
+        "remote agent",
+      );
+
+      const loadResult = await runSyncLoad(mode, [def], configDir, {
+        gitPull: ok(),
+      }, homeDir);
+      const diffs = loadedDiffs(loadResult);
+      const changedPath = changedSide === "source"
+        ? mode === "pull" ? remoteAgent : localAgent
+        : mode === "pull" ? localAgent : remoteAgent;
+      writeFileSync(changedPath, "changed after review");
+
+      let pushCalled = false;
+      const executeResult = await runSyncExecute(
+        mode,
+        diffs,
+        configDir,
+        {
+          gitAddCommitPush: async () => {
+            pushCalled = true;
+            return { ok: true };
+          },
+        },
+      );
+
+      expect(executeResult.type).toBe("error");
+      if (executeResult.type === "error") {
+        expect(executeResult.message).toContain("changed since review");
+      }
+      expect(pushCalled).toBe(false);
+      expect(readFileSync(localInstructions, "utf8"))
+        .toBe("local instructions");
+      expect(readFileSync(remoteInstructions, "utf8"))
+        .toBe("remote instructions");
+      expect(readFileSync(changedPath, "utf8"))
+        .toBe("changed after review");
+    },
+  );
+});
+
+for (const mode of ["pull", "push"] as const) {
+  describe(`runSyncExecute (${mode} empty-source safety)`, () => {
+    it("does not delete destination-only content when the harness source is empty", async () => {
+      const configDir = useTmp();
+      const homeDir = useTmp();
+      const def = testAgent([".codex/AGENTS.md"]);
+      const destination = mode === "pull"
+        ? fixtureFile(homeDir, ".codex/AGENTS.md", "local only")
+        : fixtureFile(configDir, ".codex/AGENTS.md", "remote only");
+
+      const loadResult = await runSyncLoad(mode, [def], configDir, {
+        gitPull: ok(),
+      }, homeDir);
+      const diffs = loadedDiffs(loadResult);
+
+      expect(diffs).toEqual([]);
+
+      const executeResult = await runSyncExecute(mode, diffs, configDir, {
+        gitAddCommitPush: ok(),
+      });
+
+      expect(executeResult.type).toBe("ok");
+      expect(existsSync(destination)).toBe(true);
+    });
+  });
+}

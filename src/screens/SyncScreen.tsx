@@ -5,7 +5,11 @@ import { SelectMenu } from "../components/SelectMenu";
 import { CONFIG_DIR } from "../utils/config";
 import { gitPull, gitAddCommitPush } from "../utils/shell";
 import { AGENT_DEFS } from "../utils/agentDefs";
-import { runSyncLoad, runSyncExecute, type AgentDiffEntry } from "../utils/flows";
+import {
+  runSyncLoad,
+  runSyncExecute,
+  type AgentDiffEntry,
+} from "../utils/flows";
 
 type Stage = "loading" | "review" | "executing" | "done";
 
@@ -19,19 +23,34 @@ export function SyncScreen({ mode, signal, onBack }: Props) {
   const [stage, setStage] = useState<Stage>("loading");
   const [status, setStatus] = useState("Fetching remote...");
   const [agentDiffs, setAgentDiffs] = useState<AgentDiffEntry[]>([]);
+  const [reviewPage, setReviewPage] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [doneMessage, setDoneMessage] = useState("");
 
   useInput((_input, key) => {
     if (key.escape && (stage === "done" || stage === "review")) {
       onBack();
+      return;
+    }
+
+    if (stage !== "review" || agentDiffs.length <= 1) return;
+
+    if (key.leftArrow || key.pageUp) {
+      setReviewPage((current) => Math.max(0, current - 1));
+      return;
+    }
+
+    if (key.rightArrow || key.pageDown) {
+      setReviewPage((current) =>
+        Math.min(agentDiffs.length - 1, current + 1)
+      );
     }
   });
 
   const shellDeps = {
     gitPull: (dir: string) => gitPull(dir, signal),
-    gitAddCommitPush: (dir: string, message: string) =>
-      gitAddCommitPush(dir, message, signal),
+    gitAddCommitPush: (dir: string, message: string, paths: string[]) =>
+      gitAddCommitPush(dir, message, paths, signal),
   };
 
   useEffect(() => {
@@ -48,8 +67,9 @@ export function SyncScreen({ mode, signal, onBack }: Props) {
         setStage("done");
         return;
       }
-      setStatus("Comparing agents...");
+      setStatus("Comparing files...");
       setAgentDiffs(result.agentDiffs);
+      setReviewPage(0);
       setStage("review");
     }
     void load();
@@ -63,9 +83,7 @@ export function SyncScreen({ mode, signal, onBack }: Props) {
 
     setStage("executing");
     setStatus(
-      mode === "pull"
-        ? "Copying agents from remote..."
-        : "Copying agents to remote...",
+      mode === "pull" ? "Updating local files..." : "Updating remote files...",
     );
 
     const result = await runSyncExecute(
@@ -117,22 +135,17 @@ export function SyncScreen({ mode, signal, onBack }: Props) {
   }
 
   const totalRemote = agentDiffs.reduce(
-    (acc, entry) => acc + entry.remoteCount,
+    (total, entry) => total + entry.remoteCount,
     0,
   );
   const totalLocal = agentDiffs.reduce(
-    (acc, entry) => acc + entry.localCount,
+    (total, entry) => total + entry.localCount,
     0,
   );
-
   const hasChanges = agentDiffs.some((entry) =>
-    entry.folderDiffs.some(
-      (folderDiff) =>
-        folderDiff.diff.added.length > 0 ||
-        folderDiff.diff.removed.length > 0 ||
-        folderDiff.diff.modified.length > 0,
-    ),
+    entry.pathDiffs.some((pathDiff) => pathDiff.status !== "unchanged"),
   );
+  const currentEntry = agentDiffs[reviewPage];
 
   return (
     <Box
@@ -147,74 +160,66 @@ export function SyncScreen({ mode, signal, onBack }: Props) {
         flexDirection="column"
         borderStyle="round"
         paddingX={2}
-        paddingY={1}
         width={60}
-        marginTop={1}
+        flexShrink={0}
       >
-        <Text bold>Comparison</Text>
+        <Box flexDirection="row" justifyContent="space-between">
+          <Text bold>Comparison</Text>
+          {agentDiffs.length > 1 && (
+            <Text dimColor>
+              Harness {reviewPage + 1}/{agentDiffs.length}
+            </Text>
+          )}
+        </Box>
         <Box flexDirection="row" justifyContent="space-between">
           <Text>
-            Remote: <Text color="#8be9fd">{totalRemote} skills</Text>
+            Remote: <Text color="#8be9fd">{totalRemote} files</Text>
           </Text>
           <Text>
-            Local: <Text color="#8be9fd">{totalLocal} skills</Text>
+            Local: <Text color="#8be9fd">{totalLocal} files</Text>
           </Text>
         </Box>
 
-        {agentDiffs.length === 0 && <Text dimColor>No agents found</Text>}
+        {!currentEntry && (
+          <Text dimColor>No synced files found</Text>
+        )}
 
-        {agentDiffs.map((entry) => (
-          <Box
-            key={entry.defs.map((definition) => definition.id).join(",")}
-            flexDirection="column"
-            marginTop={1}
-          >
+        {currentEntry && (
+          <Box key={currentEntry.def.id} flexDirection="column">
             <Box flexDirection="row" justifyContent="space-between">
-              <Text color="#bd93f9">
-                {entry.defs.map((definition) => definition.name).join(", ")}
-              </Text>
+              <Text color="#bd93f9">{currentEntry.def.name}</Text>
               <Text dimColor>
-                {entry.remoteCount}↓ / {entry.localCount}↑
+                {currentEntry.remoteCount}↓ / {currentEntry.localCount}↑
               </Text>
             </Box>
-            {entry.folderDiffs.map((folderDiff) => {
-              const diff = folderDiff.diff;
-              const folderHasChanges =
-                diff.added.length > 0 ||
-                diff.removed.length > 0 ||
-                diff.modified.length > 0;
+            {currentEntry.pathDiffs.map((pathDiff) => {
+              const marker = pathDiff.status === "added"
+                ? "+"
+                : pathDiff.status === "removed"
+                  ? "-"
+                  : pathDiff.status === "modified"
+                    ? "~"
+                    : "=";
+              const color = pathDiff.status === "added"
+                ? "#50fa7b"
+                : pathDiff.status === "removed"
+                  ? "#ff5555"
+                  : pathDiff.status === "modified"
+                    ? "#ffb86c"
+                    : undefined;
+
               return (
-                <Box key={folderDiff.folder} flexDirection="column">
-                  <Text dimColor>  {folderDiff.folder}/</Text>
-                  {diff.added.map((entry) => (
-                    <Text key={entry.name}>
-                      <Text color="#50fa7b">    + </Text>
-                      {entry.name}
-                    </Text>
-                  ))}
-                  {diff.removed.map((entry) => (
-                    <Text key={entry.name}>
-                      <Text color="#ff5555">    - </Text>
-                      {entry.name}
-                    </Text>
-                  ))}
-                  {diff.modified.map((entry) => (
-                    <Text key={entry.name}>
-                      <Text color="#ffb86c">    ~ </Text>
-                      {entry.name}
-                    </Text>
-                  ))}
-                  {!folderHasChanges && diff.unchanged.length > 0 && (
-                    <Text dimColor>
-                      {"    "}
-                      {diff.unchanged.length} unchanged
-                    </Text>
-                  )}
-                </Box>
+                <Text
+                  key={pathDiff.path}
+                  dimColor={pathDiff.status === "unchanged"}
+                >
+                  <Text color={color}>  {marker} </Text>
+                  {pathDiff.path}
+                </Text>
               );
             })}
           </Box>
-        ))}
+        )}
       </Box>
 
       <Box
@@ -225,7 +230,7 @@ export function SyncScreen({ mode, signal, onBack }: Props) {
       >
         <Text>
           Confirm {mode}?{" "}
-          <Text dimColor>(No is default, press Enter to cancel)</Text>
+          <Text dimColor>(No is default. Press Enter to cancel)</Text>
         </Text>
         <Box flexDirection="column" width={46}>
           <SelectMenu
@@ -252,7 +257,11 @@ export function SyncScreen({ mode, signal, onBack }: Props) {
       </Box>
 
       <Box flexShrink={0}>
-        <Text dimColor>Esc to cancel</Text>
+        <Text dimColor>
+          {agentDiffs.length > 1
+            ? "←/→ review harnesses  Esc to cancel"
+            : "Esc to cancel"}
+        </Text>
       </Box>
     </Box>
   );
