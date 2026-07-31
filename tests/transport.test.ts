@@ -59,6 +59,16 @@ function writeHome(deps: InternalDeps, relPath: string, content: string): void {
   writeFileSync(target, content, "utf8");
 }
 
+function writeHomeBytes(
+  deps: InternalDeps,
+  relPath: string,
+  content: Buffer,
+): void {
+  const target = join(deps.homeDir, ...relPath.split("/"));
+  mkdirSync(join(target, ".."), { recursive: true });
+  writeFileSync(target, content);
+}
+
 function readHome(deps: InternalDeps, relPath: string): string {
   return readFileSync(join(deps.homeDir, ...relPath.split("/")), "utf8");
 }
@@ -229,7 +239,7 @@ describe("transport", () => {
     expect(retry.state).toBe("conflicts");
   }, 60000);
 
-  it("defers the push when asked and pushes on the next commit", async () => {
+  it("defers the push when asked; a fresh begin/commit pushes later", async () => {
     const bare = makeBare();
     const a = makeMachine(bare);
     writeHome(a, ".claude/CLAUDE.md", "shared line\ncommon\n");
@@ -246,7 +256,103 @@ describe("transport", () => {
     );
     expect(remoteBefore.trim()).toBe("");
 
+    const again = await runTransportBegin(a);
+    expect(again.state).toBe("clean");
     const pushed = await runTransportCommit(a, undefined);
     expect(pushed.pushed).toBe(true);
   }, 30000);
+
+  it("refuses transport-commit without a transport in progress", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+
+    await expectCode(runTransportCommit(a, undefined), "no-transport");
+  }, 30000);
+
+  it("restores the pre-sync state when a clean transport is declined", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeHome(a, ".claude/CLAUDE.md", "shared line\ncommon\n");
+    await fullSync(a);
+
+    const b = makeMachine(bare);
+    writeHome(a, ".claude/CLAUDE.md", "A v2\ncommon\n");
+    await fullSync(a);
+    writeHome(b, ".gemini/GEMINI.md", "gemini rules\n");
+
+    const begin = await runTransportBegin(b);
+    expect(begin.state).toBe("clean");
+    if (begin.state === "clean") {
+      expect(begin.outgoing).toEqual([
+        { path: ".gemini/GEMINI.md", status: "added" },
+      ]);
+    }
+
+    const abort = await runTransportAbort(b);
+    expect(abort.aborted).toBe(true);
+    expect(existsSync(join(b.homeDir, ".claude", "CLAUDE.md"))).toBe(false);
+    expect(existsSync(join(b.homeDir, ".gemini", "GEMINI.md"))).toBe(true);
+
+    const retry = await runTransportBegin(b);
+    expect(retry.state).toBe("clean");
+    if (retry.state === "clean") {
+      expect(retry.outgoing).toEqual([
+        { path: ".gemini/GEMINI.md", status: "added" },
+      ]);
+    }
+    await runTransportCommit(b, undefined);
+    expect(readHome(b, ".claude/CLAUDE.md")).toBe("A v2\ncommon\n");
+  }, 60000);
+
+  it("resolves a binary conflict by picking a side", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    const baseBytes = Buffer.from([0x89, 0x00, 0x01, 0x02, 0x03]);
+    writeHomeBytes(a, ".claude/CLAUDE.md", baseBytes);
+    await fullSync(a);
+
+    const b = makeMachine(bare);
+    const remoteBytes = Buffer.from([0x89, 0x00, 0xaa, 0xbb, 0xcc]);
+    writeHomeBytes(a, ".claude/CLAUDE.md", remoteBytes);
+    await fullSync(a);
+    writeHomeBytes(b, ".claude/CLAUDE.md", Buffer.from([0x89, 0x00, 0xdd]));
+
+    const begin = await runTransportBegin(b);
+    expect(begin.state).toBe("conflicts");
+    if (begin.state !== "conflicts") return;
+    expect(begin.conflicts[0]!.binary).toBe(true);
+    expect(begin.conflicts[0]!.local).toBeNull();
+
+    const resolved = await runTransportResolve(b, {
+      files: [{ path: ".claude/CLAUDE.md", side: "remote" }],
+    });
+    expect(resolved.remaining).toEqual([]);
+    await runTransportCommit(b, undefined);
+
+    const merged = readFileSync(join(b.homeDir, ".claude", "CLAUDE.md"));
+    expect(Buffer.compare(merged, remoteBytes)).toBe(0);
+  }, 60000);
+
+  it("reports push rejection when origin advanced mid-transport", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeHome(a, ".claude/CLAUDE.md", "shared line\ncommon\n");
+    await fullSync(a);
+
+    const b = makeMachine(bare);
+    writeHome(b, ".gemini/GEMINI.md", "gemini rules\n");
+    const begin = await runTransportBegin(b);
+    expect(begin.state).toBe("clean");
+
+    writeHome(a, ".codex/AGENTS.md", "codex rules\n");
+    await fullSync(a);
+
+    await expectCode(runTransportCommit(b, undefined), "push-rejected");
+
+    const retry = await runTransportBegin(b);
+    expect(retry.state).toBe("clean");
+    const commit = await runTransportCommit(b, undefined);
+    expect(commit.pushed).toBe(true);
+    expect(readHome(b, ".codex/AGENTS.md")).toBe("codex rules\n");
+  }, 60000);
 });

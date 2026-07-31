@@ -1,4 +1,11 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import { AGENT_DEFS } from "../utils/agentDefs";
@@ -10,20 +17,77 @@ import {
   mirrorSyncPath,
   snapshotSyncPath,
 } from "../utils/agents";
-import { runCommand } from "../utils/shell";
 import { InternalCommandError, invalidInputError } from "./errors";
-import type { ShellResult } from "../types";
 import type { InternalDeps } from "./commands";
 
 const ALL_SYNC_PATHS = AGENT_DEFS.flatMap((def) => def.syncPaths);
+// CANONICAL_DIR rides in the commit scope so the unify flow's regeneration
+// travels with the same primitives; bare sync itself never reads or writes
+// canonical content, it only commits whatever already sits in the clone.
 const COMMIT_SCOPE = [...ALL_SYNC_PATHS, SYNC_MANIFEST_FILE, CANONICAL_DIR];
 
+const TRANSPORT_STATE_FILE = ".git-agents-transport.json";
+const MAX_CAPTURE_BYTES = 10 * 1024 * 1024;
 const NUL = String.fromCharCode(0);
 
-type GitResult = ShellResult & { exitCode?: number };
+type GitResult = {
+  ok: boolean;
+  output: string;
+  error?: string;
+  exitCode?: number;
+  oversized?: boolean;
+};
 
+// Own runner instead of shell.runCommand: conflict contents must not be
+// tail-truncated, and error sniffing needs untranslated git messages.
 function git(dir: string, ...args: string[]): Promise<GitResult> {
-  return runCommand("git", ["-C", dir, ...args]);
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn("git", ["-C", dir, ...args], {
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+        env: { ...process.env, LC_ALL: "C", LANG: "C" },
+      });
+    } catch (error) {
+      resolve({
+        ok: false,
+        output: "",
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+
+    const stdout: Buffer[] = [];
+    let stdoutBytes = 0;
+    let oversized = false;
+    const stderr: Buffer[] = [];
+    let stderrBytes = 0;
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes <= MAX_CAPTURE_BYTES) stdout.push(chunk);
+      else oversized = true;
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderrBytes += chunk.length;
+      if (stderrBytes <= 64 * 1024) stderr.push(chunk);
+    });
+    child.on("error", (error) => {
+      resolve({ ok: false, output: "", error: error.message });
+    });
+    child.on("close", (exitCode) => {
+      const output = Buffer.concat(stdout).toString("utf8");
+      const errText = Buffer.concat(stderr).toString("utf8").trim();
+      resolve({
+        ok: exitCode === 0,
+        output,
+        error: exitCode === 0 ? undefined : errText || `git exited with code ${exitCode}`,
+        exitCode: exitCode ?? undefined,
+        oversized: oversized || undefined,
+      });
+    });
+  });
 }
 
 function requireClone(deps: InternalDeps): void {
@@ -39,8 +103,33 @@ function mergeInProgress(configDir: string): boolean {
   return existsSync(join(configDir, ".git", "MERGE_HEAD"));
 }
 
+type TransportState = { version: 1; preHead: string | null };
+
+function statePath(configDir: string): string {
+  return join(configDir, TRANSPORT_STATE_FILE);
+}
+
+function readTransportState(configDir: string): TransportState | null {
+  const path = statePath(configDir);
+  if (!existsSync(path)) return null;
+  try {
+    const state = JSON.parse(readFileSync(path, "utf8"));
+    if (state?.version !== 1) return null;
+    return {
+      version: 1,
+      preHead: typeof state.preHead === "string" ? state.preHead : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function clearTransportState(configDir: string): void {
+  rmSync(statePath(configDir), { force: true });
+}
+
 async function conflictedPaths(configDir: string): Promise<string[]> {
-  const result = await git(configDir, "ls-files", "-u");
+  const result = await git(configDir, "ls-files", "-u", "-z");
   if (!result.ok) {
     throw new InternalCommandError(
       "transport-failed",
@@ -48,24 +137,26 @@ async function conflictedPaths(configDir: string): Promise<string[]> {
     );
   }
   const paths = new Set<string>();
-  for (const line of (result.output ?? "").split("\n")) {
-    const path = line.split("\t")[1];
+  for (const entry of result.output.split(NUL)) {
+    const path = entry.split("\t")[1];
     if (path) paths.add(path);
   }
   return [...paths].sort();
 }
 
+type StageRead = { content: string | null; opaque: boolean };
+
 async function stageContent(
   configDir: string,
   stage: 1 | 2 | 3,
   path: string,
-): Promise<string | null> {
+): Promise<StageRead> {
   const result = await git(configDir, "show", `:${stage}:${path}`);
-  return result.ok ? (result.output ?? "") : null;
-}
-
-function isBinary(content: string | null): boolean {
-  return content !== null && content.includes(NUL);
+  if (!result.ok) return { content: null, opaque: false };
+  if (result.oversized || result.output.includes(NUL)) {
+    return { content: null, opaque: true };
+  }
+  return { content: result.output, opaque: false };
 }
 
 export type ConflictFile = {
@@ -82,7 +173,15 @@ function diffAgainstClone(
   deps: InternalDeps,
   direction: "outgoing" | "incoming",
 ): PathChange[] {
-  const initialized = new Set(readSyncManifest(deps.configDir)?.paths ?? []);
+  let initialized: Set<string>;
+  try {
+    initialized = new Set(readSyncManifest(deps.configDir)?.paths ?? []);
+  } catch (error: any) {
+    throw new InternalCommandError(
+      "transport-failed",
+      `Could not read the sync manifest: ${error?.message ?? String(error)}`,
+    );
+  }
   const changes: PathChange[] = [];
   for (const syncPath of ALL_SYNC_PATHS) {
     const localPath = getLocalSyncPath(syncPath, deps.homeDir);
@@ -124,7 +223,7 @@ async function stageScope(configDir: string): Promise<void> {
   for (const scopePath of COMMIT_SCOPE) {
     const inWorktree = existsSync(join(configDir, ...scopePath.split("/")));
     const tracked = await git(configDir, "ls-files", "--", scopePath);
-    if (!inWorktree && !(tracked.ok && tracked.output?.trim())) continue;
+    if (!inWorktree && !(tracked.ok && tracked.output.trim())) continue;
     const added = await git(configDir, "add", "-A", "--", scopePath);
     if (!added.ok) {
       throw new InternalCommandError(
@@ -135,9 +234,27 @@ async function stageScope(configDir: string): Promise<void> {
   }
 }
 
+async function mergedPaths(configDir: string): Promise<string[]> {
+  const result = await git(
+    configDir,
+    "diff",
+    "--name-only",
+    "-z",
+    "HEAD",
+    "MERGE_HEAD",
+  );
+  if (!result.ok) return [];
+  return result.output.split(NUL).filter(Boolean).sort();
+}
+
 export type TransportBeginResult =
   | { state: "clean"; outgoing: PathChange[]; incoming: PathChange[] }
-  | { state: "conflicts"; outgoing: PathChange[]; conflicts: ConflictFile[] };
+  | {
+      state: "conflicts";
+      outgoing: PathChange[];
+      incoming: string[];
+      conflicts: ConflictFile[];
+    };
 
 export async function runTransportBegin(
   deps: InternalDeps,
@@ -149,6 +266,17 @@ export async function runTransportBegin(
       "A transport merge is already in progress. Resolve it (transport-resolve, transport-commit) or abort it (transport-abort) first.",
     );
   }
+
+  const head = await git(deps.configDir, "rev-parse", "--verify", "HEAD^{commit}");
+  const state: TransportState = {
+    version: 1,
+    preHead: head.ok ? head.output.trim() : null,
+  };
+  writeFileSync(
+    statePath(deps.configDir),
+    `${JSON.stringify(state, null, 2)}\n`,
+    "utf8",
+  );
 
   const outgoing = mirrorChanged(deps, "outgoing");
 
@@ -196,16 +324,21 @@ export async function runTransportBegin(
           stageContent(deps.configDir, 2, path),
           stageContent(deps.configDir, 3, path),
         ]);
-        const binary = isBinary(base) || isBinary(local) || isBinary(remote);
+        const binary = base.opaque || local.opaque || remote.opaque;
         conflicts.push({
           path,
           binary,
-          base: binary ? null : base,
-          local: binary ? null : local,
-          remote: binary ? null : remote,
+          base: binary ? null : base.content,
+          local: binary ? null : local.content,
+          remote: binary ? null : remote.content,
         });
       }
-      return { state: "conflicts", outgoing, conflicts };
+      return {
+        state: "conflicts",
+        outgoing,
+        incoming: await mergedPaths(deps.configDir),
+        conflicts,
+      };
     }
   }
 
@@ -216,10 +349,18 @@ export async function runTransportBegin(
   };
 }
 
+const ResolveFileSchema = z
+  .object({
+    path: z.string().min(1),
+    content: z.string().optional(),
+    side: z.enum(["local", "remote"]).optional(),
+  })
+  .refine((file) => (file.content !== undefined) !== (file.side !== undefined), {
+    message: "provide exactly one of content or side",
+  });
+
 const ResolveInputSchema = z.object({
-  files: z
-    .array(z.object({ path: z.string().min(1), content: z.string() }))
-    .min(1),
+  files: z.array(ResolveFileSchema).min(1),
 });
 
 export type TransportResolveResult = {
@@ -250,9 +391,25 @@ export async function runTransportResolve(
         `${file.path} is not a conflicted file in this merge.`,
       );
     }
-    const target = getRemoteSyncPath(file.path, deps.configDir);
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, file.content, "utf8");
+    if (file.side !== undefined) {
+      const checkedOut = await git(
+        deps.configDir,
+        "checkout",
+        file.side === "local" ? "--ours" : "--theirs",
+        "--",
+        file.path,
+      );
+      if (!checkedOut.ok) {
+        throw new InternalCommandError(
+          "transport-failed",
+          `Could not pick the ${file.side} side of ${file.path}: ${checkedOut.error ?? "unknown error"}`,
+        );
+      }
+    } else {
+      const target = getRemoteSyncPath(file.path, deps.configDir);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, file.content!, "utf8");
+    }
     const added = await git(deps.configDir, "add", "--", file.path);
     if (!added.ok) {
       throw new InternalCommandError(
@@ -288,6 +445,13 @@ export async function runTransportCommit(
   if (!parsed.success) throw invalidInputError("transport-commit", parsed.error);
   const deferPush = parsed.data?.deferPush === true;
 
+  if (readTransportState(deps.configDir) === null) {
+    throw new InternalCommandError(
+      "no-transport",
+      "No transport is in progress. Run transport-begin first.",
+    );
+  }
+
   let mergeCompleted = false;
   if (mergeInProgress(deps.configDir)) {
     const remaining = await conflictedPaths(deps.configDir);
@@ -313,14 +477,26 @@ export async function runTransportCommit(
   if (!deferPush) {
     const pushResult = await git(deps.configDir, "push", "-u", "origin", "HEAD");
     if (!pushResult.ok) {
+      const error = pushResult.error ?? "";
+      const rejected =
+        error.includes("[rejected]") ||
+        error.includes("non-fast-forward") ||
+        error.includes("fetch first");
+      if (rejected) {
+        throw new InternalCommandError(
+          "push-rejected",
+          "Origin advanced since transport-begin. Run transport-begin again to merge the new changes, then transport-commit.",
+        );
+      }
       throw new InternalCommandError(
         "push-failed",
-        `Could not push to origin: ${pushResult.error ?? "unknown error"}. The merge is committed locally; re-running transport-commit retries the push.`,
+        `Could not push to origin: ${error || "unknown error"}. The merge is committed locally; re-running transport-commit retries the push.`,
       );
     }
     pushed = true;
   }
 
+  clearTransportState(deps.configDir);
   return { mergeCompleted, mirroredBack, pushed };
 }
 
@@ -330,15 +506,38 @@ export async function runTransportAbort(
   deps: InternalDeps,
 ): Promise<TransportAbortResult> {
   requireClone(deps);
-  if (!mergeInProgress(deps.configDir)) {
-    return { aborted: false, message: "No transport merge is in progress." };
+  const state = readTransportState(deps.configDir);
+  const merging = mergeInProgress(deps.configDir);
+
+  if (!merging && state === null) {
+    return { aborted: false, message: "No transport is in progress." };
   }
-  const aborted = await git(deps.configDir, "merge", "--abort");
-  if (!aborted.ok) {
-    throw new InternalCommandError(
-      "transport-failed",
-      `Could not abort the merge: ${aborted.error ?? "unknown error"}`,
-    );
+
+  if (merging) {
+    const aborted = await git(deps.configDir, "merge", "--abort");
+    if (!aborted.ok) {
+      throw new InternalCommandError(
+        "transport-failed",
+        `Could not abort the merge: ${aborted.error ?? "unknown error"}`,
+      );
+    }
   }
-  return { aborted: true, message: "Merge aborted; pre-sync state restored." };
+
+  if (state !== null) {
+    if (state.preHead !== null) {
+      const reset = await git(deps.configDir, "reset", "--hard", state.preHead);
+      if (!reset.ok) {
+        throw new InternalCommandError(
+          "transport-failed",
+          `Could not restore the pre-sync state: ${reset.error ?? "unknown error"}`,
+        );
+      }
+    } else {
+      await git(deps.configDir, "update-ref", "-d", "HEAD");
+      await git(deps.configDir, "reset");
+    }
+    clearTransportState(deps.configDir);
+  }
+
+  return { aborted: true, message: "Transport aborted; pre-sync state restored." };
 }

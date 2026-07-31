@@ -4,10 +4,10 @@ The sync state is just git: the clone's history is the per-machine base, and a c
 
 ## 1. Begin
 
-Run `transport-begin`. It mirrors local harness files into the clone, commits them, and merges from origin. Two outcomes:
+Run `transport-begin`. It records the pre-sync point, mirrors local harness files into the clone, commits them, and merges from origin. Two outcomes:
 
 - `state: "clean"`: `outgoing` lists what this machine contributes, `incoming` what the merge brought. Go to step 3.
-- `state: "conflicts"`: each entry carries `path`, `binary`, and the `base`, `local`, and `remote` contents. Go to step 2.
+- `state: "conflicts"`: `incoming` lists every path the merge touches, and each conflict entry carries `path`, `binary`, and the `base`, `local`, and `remote` contents. Go to step 2.
 
 If it reports `transport-in-progress`, a previous run never finished: inspect with the user and either resolve it or run `transport-abort`.
 
@@ -19,11 +19,11 @@ Git already merged non-overlapping edits silently; what you see genuinely overla
 - **Interview if contradictory.** When the sides cannot both be true, show the user both versions and ask which outcome they want (one side, the other, or a wording they give you).
 - **Binary files are always a pick-a-side interview**: local or remote, never your call.
 
-Submit resolutions with `transport-resolve` (`{"files":[{"path":"...","content":"..."}]}`). Instruction files carrying `ga:` markers are plain text here; do not consult the canonical.
+Submit text resolutions with `transport-resolve` (`{"files":[{"path":"...","content":"..."}]}`); submit side picks with `{"files":[{"path":"...","side":"local"}]}` (or `"remote"`). Instruction files carrying `ga:` markers are plain text here; do not consult the canonical.
 
 ## 3. Gate, then commit
 
-Show the user what will change: the incoming and outgoing paths, and for every conflicted file a diff of the resolution against both sides. **No is the default**; declining means `transport-abort`. On yes, run `transport-commit`. It completes the merge, mirrors the merged result back into the home directory, and pushes; on `push-failed`, re-running `transport-commit` retries the push safely.
+Show the user what will change: the incoming and outgoing paths, and for every conflicted file a diff of the resolution against both sides. **No is the default**; declining means `transport-abort`, which restores the recorded pre-sync state even when the merge completed cleanly on its own. On yes, run `transport-commit`. It completes the merge, mirrors the merged result back into the home directory, and pushes. On `push-failed`, re-running `transport-commit` retries the push safely; on `push-rejected`, origin advanced mid-transport: run `transport-begin` again to merge the new changes first.
 
 ## 4. Report
 

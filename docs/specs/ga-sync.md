@@ -49,10 +49,10 @@ Hidden subcommands of the npm binary, JSON in/out, no interactive prompts. Not d
 | Command | Effect |
 | --- | --- |
 | `status` | Report config presence, harness file paths and hashes, canonical version, drift summary, caveats |
-| `transport-begin` | Mirror local harness files into the clone, commit them (scoped), fetch and attempt the merge from origin; report either the clean incoming/outgoing changes or the conflicted files with base, local, and remote contents |
-| `transport-resolve` | Accept per-file resolved contents for conflicted files; write and mark them resolved |
-| `transport-commit` | Complete the merge commit, mirror the merged result back to the home directory, and push; refuses while conflicts remain unresolved. Takes a defer-push option used by `sync unify` |
-| `transport-abort` | Abort the in-progress merge and restore the pre-sync state |
+| `transport-begin` | Record the pre-sync point, mirror local harness files into the clone, commit them (scoped), fetch and attempt the merge from origin; report either the clean incoming/outgoing changes or the merge's touched paths plus the conflicted files with base, local, and remote contents |
+| `transport-resolve` | Accept per-file resolutions: full contents for text, or a local/remote side pick (binary conflicts) |
+| `transport-commit` | Complete the merge commit, mirror the merged result back to the home directory, and push; refuses without a transport in progress or while conflicts remain unresolved; distinguishes retryable push failures from origin-advanced rejection. Takes a defer-push option used by `sync unify` |
+| `transport-abort` | Abort the in-progress merge and restore the recorded pre-sync state, including after a clean auto-merge |
 | `gather` | Collect the harness files and canonical into a merge workspace; emit structured diffs vs canonical |
 | `stage` | Accept a proposed canonical (core + overlays) from the agent; render exact per-file diffs of what apply would write |
 | `apply` | Write staged results to canonical and harness files; update manifest; refuse if inputs changed since stage |
@@ -140,7 +140,7 @@ Instruction files carrying ga markers are **plain text** here; if a resolution m
 2. **Gather + merge.** Scripts emit structured drift; the agent proposes the full merge result (core + overlays) in one pass, then asks the user targeted questions **only** on genuinely ambiguous chunks. Steady state is usually zero questions.
 3. **Stage + confirm.** Scripts render exact per-file diffs (canonical plus the four generated files). Nothing is written until the user explicitly confirms; **No is the default**. The model's own summary is never the gate.
 4. **Apply + regenerate.** Scripts write canonical and regenerate all copies, update the manifest. Regeneration lives **only** here: because unify always regenerates before pushing, the remote's copies are never stale relative to the remote canonical, and bare sync transports them as plain files. Locally detected staleness is reported by `status`, which points at `sync unify`.
-5. **Push.** One scoped commit and push covering transport and convergence, under the existing safety rules.
+5. **Push.** One push covering transport and convergence, under the existing safety rules; the run may record several scoped commits along the way (local state, merge, regeneration).
 
 There is **no by-hand fallback**: scripts are skill-internal. A machine without a working agent does not sync.
 
