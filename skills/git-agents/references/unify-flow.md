@@ -2,7 +2,7 @@
 
 One unified convergence run: transport, then canonical merge, then regeneration, then a single push at the end. The first run is not special: it is simply the flow facing its biggest drift (no canonical yet, every file fully unattributed).
 
-Every write goes through the gate (exact diffs, explicit confirmation, No default).
+Every write goes through the gate (exact diffs and a plain-text question in the same message, explicit confirmation, no question tools, No default).
 
 ## 1. Transport, push deferred
 
@@ -37,7 +37,7 @@ Run `stage` with `{"core":"...","overlays":{...},"inputs":<gather.inputs>}`. Wri
 
 ## 5. Gate, then apply
 
-Confirm with the user against the staged diffs. On yes, run `apply`. On `stale-inputs`, go back to step 2. On success the canonical is written, all copies regenerate, and the stage clears.
+Confirm with the user against the staged diffs, plain text in the same message as the diffs (gate rule). On yes, run `apply`. On `stale-inputs`, go back to step 2. On success the canonical is written, all copies regenerate, and the stage clears.
 
 ## 6. The single push
 

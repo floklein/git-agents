@@ -43,7 +43,7 @@ After the requested subcommand's work is fully done (never before or instead of 
 
 ## The gate
 
-Before anything is written, show the user the exact script-rendered diffs and get an explicit confirmation. **No is the default**: anything but a clear yes means stop, and stopping costs nothing. Your own summary is never a substitute for the diffs. Declining a transport merge means `transport-abort`.
+Before anything is written, show the user the exact script-rendered diffs and get an explicit confirmation. The diffs and the question travel in the **same message**: render the diffs, then ask in plain text directly below them. Never use a structured question tool (multiple-choice UI, option chips, any tool-mediated prompt) for gate confirmation; those render without the diffs in view, and the user must be able to see the diffs at the moment of answering. **No is the default**: anything but a clear yes means stop, and stopping costs nothing. Your own summary is never a substitute for the diffs. Declining a transport merge means `transport-abort`.
 
 ## Subcommands
 
