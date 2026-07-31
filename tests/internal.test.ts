@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import {
@@ -145,6 +145,69 @@ describe("runInternalCommand", () => {
     const outcome = await runInternalCommand("status", undefined, makeDeps());
 
     expect(JSON.parse(JSON.stringify(outcome))).toEqual(outcome);
+  });
+});
+
+describe("version-check", () => {
+  async function check(input: unknown, cliVersion?: string) {
+    const deps = { ...makeDeps(), ...(cliVersion ? { cliVersion } : {}) };
+    const outcome = await runInternalCommand("version-check", input, deps);
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("unreachable");
+    return outcome.result as {
+      skillVersion: string | null;
+      cliVersion: string;
+      updateAvailable: boolean;
+    };
+  }
+
+  it("reports an update when the skill is older than the CLI", async () => {
+    const result = await check({ skillVersion: "1.0.0" }, "1.1.0");
+
+    expect(result).toEqual({
+      skillVersion: "1.0.0",
+      cliVersion: "1.1.0",
+      updateAvailable: true,
+    });
+  });
+
+  it("reports no update for an equal or newer skill", async () => {
+    expect((await check({ skillVersion: "1.1.0" }, "1.1.0")).updateAvailable).toBe(false);
+    expect((await check({ skillVersion: "2.0.0" }, "1.1.0")).updateAvailable).toBe(false);
+  });
+
+  it("compares segments numerically, not lexically", async () => {
+    expect((await check({ skillVersion: "1.9.0" }, "1.10.0")).updateAvailable).toBe(true);
+    expect((await check({ skillVersion: "1.10.0" }, "1.9.0")).updateAvailable).toBe(false);
+  });
+
+  it("never errors: missing or malformed input means no update", async () => {
+    expect(await check(undefined, "1.1.0")).toEqual({
+      skillVersion: null,
+      cliVersion: "1.1.0",
+      updateAvailable: false,
+    });
+    expect((await check({}, "1.1.0")).updateAvailable).toBe(false);
+    expect((await check({ skillVersion: "banana" }, "1.1.0")).updateAvailable).toBe(false);
+    expect((await check({ skillVersion: 42 }, "1.1.0")).updateAvailable).toBe(false);
+  });
+
+  it("defaults the CLI version from the package manifest", async () => {
+    const pkg = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    );
+
+    const result = await check({ skillVersion: "0.0.1" });
+
+    expect(result.cliVersion).toBe(pkg.version);
+    expect(result.updateAvailable).toBe(true);
+  });
+
+  it("appears in the unknown-command help list", async () => {
+    const outcome = await runInternalCommand("nope", undefined, makeDeps());
+
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.error.message).toContain("version-check");
   });
 });
 

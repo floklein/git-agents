@@ -20,6 +20,7 @@ import {
   runTransportResolve,
 } from "./transport";
 import { defaultSetupFlowDeps, runSetup, type SetupFlowDeps } from "./setup";
+import { runVersionCheck } from "./versionCheck";
 import { detectCaveats, type Caveat } from "./caveats";
 import { InternalCommandError } from "./errors";
 import type { SyncPathSnapshot } from "../types";
@@ -29,6 +30,8 @@ export type InternalDeps = {
   configDir: string;
   configFile: string;
   setup?: SetupFlowDeps;
+  // Injectable for tests; version-check falls back to the package version.
+  cliVersion?: string;
 };
 
 // GIT_AGENTS_HOME / GIT_AGENTS_CONFIG_DIR are unofficial overrides for
@@ -185,6 +188,7 @@ const COMMANDS: Record<
   "transport-abort": (deps) => runTransportAbort(deps),
   setup: (deps, input) =>
     runSetup(deps, input, deps.setup ?? defaultSetupFlowDeps(deps)),
+  "version-check": (deps, input) => runVersionCheck(deps, input),
   "install-pointer-docs": (deps) => ({
     settingsPath: "Cursor Settings > Rules > User Rules",
     rule:
