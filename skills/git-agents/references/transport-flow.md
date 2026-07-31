@@ -11,6 +11,8 @@ Run `transport-begin`. It records the pre-sync point (kept across retries, so ab
 
 If it reports `transport-in-progress`, a previous run never finished: inspect with the user and either resolve it or run `transport-abort`.
 
+If it reports `unrelated-histories`, the remote history was rewritten and no longer shares a base with the local clone. Relay the remedy: run `transport-abort` to restore the pre-sync state, re-clone with `setup` and `force:true`, then run the sync again. Local harness files are not affected.
+
 ## 2. Resolve conflicts
 
 Git already merged non-overlapping edits silently; what you see genuinely overlaps. Per file:

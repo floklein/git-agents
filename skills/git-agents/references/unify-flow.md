@@ -29,7 +29,7 @@ Ask the user **only** about genuinely ambiguous chunks: content you cannot confi
 
 ## 4. Stage
 
-Run `stage` with `{"core":"...","overlays":{...},"inputs":<gather.inputs>}`.
+Run `stage` with `{"core":"...","overlays":{...},"inputs":<gather.inputs>}`. Write that JSON to a temp file and pass it with `--input-file` (or pipe it via `--input -`): the payload carries multi-line content with backslashes and backticks, which inline `--input` can corrupt through shell quoting, especially on Windows.
 
 - Show every non-empty `diff` from the result verbatim (they cover canonical core, overlays including deletions, and all four generated files).
 - Surface every warning: `near-cap` or `over-cap` means the Codex file approaches or exceeds its 32 KiB silent-truncation cap; propose trimming before applying.

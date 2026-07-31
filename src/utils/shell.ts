@@ -209,6 +209,24 @@ export async function initRepo(
   return runCommand("git", ["-C", dir, "init"], signal);
 }
 
+// Commits reachable from any local branch or HEAD but from no
+// remote-tracking ref: what a re-clone would discard. Failures (unborn
+// HEAD, corrupt repo) count as zero; there is nothing recoverable to
+// protect in either case.
+export async function gitCountUnpushedCommits(
+  dir: string,
+  signal?: AbortSignal,
+): Promise<number> {
+  const result = await runCommand(
+    "git",
+    ["-C", dir, "rev-list", "--count", "HEAD", "--branches", "--not", "--remotes"],
+    signal,
+  );
+  if (!result.ok) return 0;
+  const count = Number.parseInt(result.output?.trim() ?? "", 10);
+  return Number.isNaN(count) ? 0 : count;
+}
+
 export async function gitSetRemoteUrl(
   dir: string,
   url: string,

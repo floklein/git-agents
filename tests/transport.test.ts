@@ -15,6 +15,7 @@ import {
   runTransportCommit,
   runTransportResolve,
 } from "../src/internal/transport";
+import { defaultSetupFlowDeps, runSetup } from "../src/internal/setup";
 import { propagateCanonical } from "../src/canonical/canonical";
 import { InternalCommandError } from "../src/internal/errors";
 import type { InternalDeps } from "../src/internal/commands";
@@ -78,6 +79,23 @@ async function fullSync(deps: InternalDeps): Promise<void> {
   const begin = await runTransportBegin(deps);
   expect(begin.state).toBe("clean");
   await runTransportCommit(deps, undefined);
+}
+
+// Rewrite the remote from scratch: a new root commit force-pushed over
+// whatever history the machines synced against.
+function rewriteRemote(bare: string): void {
+  const rewrite = join(makeTmpDir("ga-transport-rewrite"), "repo");
+  execFileSync("git", ["init", "-b", "main", rewrite], { stdio: "ignore" });
+  writeFileSync(join(rewrite, "seed.txt"), "new root\n", "utf8");
+  execFileSync("git", ["-C", rewrite, "add", "-A"], { stdio: "ignore" });
+  execFileSync(
+    "git",
+    ["-C", rewrite, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "new root"],
+    { stdio: "ignore" },
+  );
+  execFileSync("git", ["-C", rewrite, "push", "--force", bare, "main"], {
+    stdio: "ignore",
+  });
 }
 
 async function expectCode(
@@ -249,6 +267,7 @@ describe("transport", () => {
     expect(begin.state).toBe("clean");
     const deferred = await runTransportCommit(a, { deferPush: true });
     expect(deferred.pushed).toBe(false);
+    expect(deferred.pushDeferred).toBe(true);
 
     const remoteBefore = execFileSync(
       "git",
@@ -261,6 +280,91 @@ describe("transport", () => {
     expect(again.state).toBe("clean");
     const pushed = await runTransportCommit(a, undefined);
     expect(pushed.pushed).toBe(true);
+    expect(pushed.pushDeferred).toBe(false);
+  }, 30000);
+
+  it("points a failed merge at transport-abort", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeHome(a, ".claude/CLAUDE.md", "shared line\ncommon\n");
+    await fullSync(a);
+
+    // Losing the remote entirely fails the pull without conflicts and
+    // without the unrelated-histories signature: the generic path.
+    rmSync(bare, { recursive: true, force: true });
+    writeHome(a, ".claude/CLAUDE.md", "shared line\ncommon\nlocal edit\n");
+
+    try {
+      await runTransportBegin(a);
+      expect.unreachable();
+    } catch (error) {
+      expect(error).toBeInstanceOf(InternalCommandError);
+      const typed = error as InternalCommandError;
+      expect(typed.code).toBe("transport-failed");
+      expect(typed.message).toContain("transport-abort");
+    }
+
+    // The state marker must survive the failure so abort can still
+    // restore the pre-sync point.
+    expect(existsSync(join(a.configDir, ".git-agents-transport.json"))).toBe(
+      true,
+    );
+    const abort = await runTransportAbort(a);
+    expect(abort.aborted).toBe(true);
+    expect(existsSync(join(a.configDir, ".git-agents-transport.json"))).toBe(
+      false,
+    );
+  }, 30000);
+
+  it("reports a rewritten remote as unrelated-histories with a remedy", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeHome(a, ".claude/CLAUDE.md", "shared line\ncommon\n");
+    await fullSync(a);
+    rewriteRemote(bare);
+
+    writeHome(a, ".claude/CLAUDE.md", "shared line\ncommon\nlocal edit\n");
+    try {
+      await runTransportBegin(a);
+      expect.unreachable();
+    } catch (error) {
+      expect(error).toBeInstanceOf(InternalCommandError);
+      const typed = error as InternalCommandError;
+      expect(typed.code).toBe("unrelated-histories");
+      expect(typed.message).toContain("transport-abort");
+      expect(typed.message).toContain("force:true");
+    }
+  }, 30000);
+
+  it("recovers from a rewritten remote: abort, forced re-clone, clean sync", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeHome(a, ".claude/CLAUDE.md", "shared line\ncommon\n");
+    await fullSync(a);
+    rewriteRemote(bare);
+
+    writeHome(a, ".claude/CLAUDE.md", "shared line\ncommon\nlocal edit\n");
+    await expectCode(runTransportBegin(a), "unrelated-histories");
+
+    const abort = await runTransportAbort(a);
+    expect(abort.aborted).toBe(true);
+
+    // The fetch already moved origin/main to the new root, so the old
+    // history counts as unpushed: the guard demands an explicit discard.
+    const flow = defaultSetupFlowDeps(a);
+    const input = { remote: "git" as const, repoUrl: bare, force: true };
+    await expectCode(runSetup(a, input, flow), "unpushed-commits");
+
+    const result = await runSetup(a, { ...input, discardLocal: true }, flow);
+    expect(result.recloned).toBe(true);
+
+    const begin = await runTransportBegin(a);
+    expect(begin.state).toBe("clean");
+    const commit = await runTransportCommit(a, undefined);
+    expect(commit.pushed).toBe(true);
+    expect(readHome(a, ".claude/CLAUDE.md")).toBe(
+      "shared line\ncommon\nlocal edit\n",
+    );
   }, 30000);
 
   it("refuses transport-commit without a transport in progress", async () => {

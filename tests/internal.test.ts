@@ -149,34 +149,134 @@ describe("runInternalCommand", () => {
 });
 
 describe("parseInternalArgs", () => {
-  it("rejects a missing command", () => {
-    const parsed = parseInternalArgs([]);
+  it("rejects a missing command", async () => {
+    const parsed = await parseInternalArgs([]);
 
     expect("error" in parsed).toBe(true);
     if ("error" in parsed) expect(parsed.error.code).toBe("missing-command");
   });
 
-  it("parses a bare command with no input", () => {
-    const parsed = parseInternalArgs(["status"]);
+  it("parses a bare command with no input", async () => {
+    const parsed = await parseInternalArgs(["status"]);
 
     expect(parsed).toEqual({ command: "status", input: undefined });
   });
 
-  it("parses JSON input", () => {
-    const parsed = parseInternalArgs(["status", "--input", '{"a":1}']);
+  it("parses JSON input", async () => {
+    const parsed = await parseInternalArgs(["status", "--input", '{"a":1}']);
 
     expect(parsed).toEqual({ command: "status", input: { a: 1 } });
   });
 
-  it("rejects malformed JSON input as a structured error", () => {
-    const parsed = parseInternalArgs(["status", "--input", "{nope"]);
+  it("rejects malformed JSON input as a structured error", async () => {
+    const parsed = await parseInternalArgs(["status", "--input", "{nope"]);
 
     expect("error" in parsed).toBe(true);
     if ("error" in parsed) expect(parsed.error.code).toBe("invalid-input");
   });
 
-  it("rejects --input without a value", () => {
-    const parsed = parseInternalArgs(["status", "--input"]);
+  it("rejects --input without a value", async () => {
+    const parsed = await parseInternalArgs(["status", "--input"]);
+
+    expect("error" in parsed).toBe(true);
+    if ("error" in parsed) expect(parsed.error.code).toBe("invalid-input");
+  });
+
+  it("reads input from a file, preserving backslashes byte-for-byte", async () => {
+    const dir = makeTmpDir("ga-internal-input");
+    const payload = {
+      content: "use `C:\\nvm4w\\nodejs\\npm.cmd`\nnext line\r\nand `backticks`",
+    };
+    const file = join(dir, "input.json");
+    writeFileSync(file, JSON.stringify(payload), "utf8");
+
+    const parsed = await parseInternalArgs(["stage", "--input-file", file]);
+
+    expect(parsed).toEqual({ command: "stage", input: payload });
+  });
+
+  it("reads input from stdin when --input is -", async () => {
+    const parsed = await parseInternalArgs(["stage", "--input", "-"], {
+      readStdin: async () => '{"a":"C:\\\\nvm4w\\\\nodejs\\\\npm.cmd"}',
+    });
+
+    expect(parsed).toEqual({
+      command: "stage",
+      input: { a: "C:\\nvm4w\\nodejs\\npm.cmd" },
+    });
+  });
+
+  it("rejects --input-file without a value", async () => {
+    const parsed = await parseInternalArgs(["stage", "--input-file"]);
+
+    expect("error" in parsed).toBe(true);
+    if ("error" in parsed) expect(parsed.error.code).toBe("invalid-input");
+  });
+
+  it("rejects an unreadable input file, naming the channel", async () => {
+    const parsed = await parseInternalArgs([
+      "stage",
+      "--input-file",
+      join(makeTmpDir("ga-internal-input"), "missing.json"),
+    ]);
+
+    expect("error" in parsed).toBe(true);
+    if ("error" in parsed) {
+      expect(parsed.error.code).toBe("invalid-input");
+      expect(parsed.error.message).toContain("--input-file");
+    }
+  });
+
+  it("rejects invalid JSON from the file channel, naming the channel", async () => {
+    const file = join(makeTmpDir("ga-internal-input"), "input.json");
+    writeFileSync(file, "{nope", "utf8");
+
+    const parsed = await parseInternalArgs(["stage", "--input-file", file]);
+
+    expect("error" in parsed).toBe(true);
+    if ("error" in parsed) {
+      expect(parsed.error.code).toBe("invalid-input");
+      expect(parsed.error.message).toContain("--input-file");
+    }
+  });
+
+  it("rejects invalid JSON from stdin, naming the channel", async () => {
+    const parsed = await parseInternalArgs(["stage", "--input", "-"], {
+      readStdin: async () => "{nope",
+    });
+
+    expect("error" in parsed).toBe(true);
+    if ("error" in parsed) {
+      expect(parsed.error.code).toBe("invalid-input");
+      expect(parsed.error.message).toContain("stdin");
+    }
+  });
+
+  it("rejects a failing stdin read, naming the channel", async () => {
+    const parsed = await parseInternalArgs(["stage", "--input", "-"], {
+      readStdin: async () => {
+        throw new Error("stream closed");
+      },
+    });
+
+    expect("error" in parsed).toBe(true);
+    if ("error" in parsed) {
+      expect(parsed.error.code).toBe("invalid-input");
+      expect(parsed.error.message).toContain("stdin");
+    }
+  });
+
+  it("rejects combining --input and --input-file", async () => {
+    const file = join(makeTmpDir("ga-internal-input"), "input.json");
+    writeFileSync(file, "{}", "utf8");
+
+    const parsed = await parseInternalArgs([
+      "stage",
+      "--input",
+      "{}",
+      "--input-file",
+      file,
+    ]);
 
     expect("error" in parsed).toBe(true);
     if ("error" in parsed) expect(parsed.error.code).toBe("invalid-input");

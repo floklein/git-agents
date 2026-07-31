@@ -9,10 +9,12 @@ disable-model-invocation: true
 You orchestrate; deterministic scripts do every file operation. Run them with:
 
 ```
-npx -y git-agents --internal <command> [--input <json>]
+npx -y git-agents --internal <command> [--input <json> | --input - | --input-file <path>]
 ```
 
 Every command prints exactly one JSON envelope: `{"ok":true,"result":...}` or `{"ok":false,"error":{"code":"...","message":"..."}}`. Relay error messages with their remedy; never edit synced files by hand; never write anything except through the gate below.
+
+Input channels: inline `--input <json>` is fine for small payloads; `--input-file <path>` reads the JSON from a file and `--input -` reads it from stdin, so the payload never crosses shell quoting. For any payload carrying multi-line content, backslashes, or backticks (`stage` above all, especially on Windows), write the JSON to a temp file and pass `--input-file`.
 
 The command surface:
 
@@ -46,9 +48,9 @@ Run `status`. Report concisely: configured and clone state, canonical version, e
 
 ### setup
 
-1. Run `status`. If configured with a clone present, report that and stop; reconfigure (with `force:true`) only if the user explicitly asks.
+1. Run `status`. If configured with a clone present, report that and stop; reconfigure (with `force:true`) only if the user explicitly asks. `force:true` deletes the local clone and re-clones from the remote; it is the recovery path after a rewritten remote history. Local harness files are not affected.
 2. Ask the user's remote preference: GitHub CLI auto-create (a private `git-agents-remote` repo) or a custom git remote URL.
-3. Run `setup` with `{"remote":"gh"}` or `{"remote":"git","repoUrl":"..."}`. On a typed error (`gh-not-installed`, `gh-not-authenticated`, `invalid-repo-url`, `clone-failed`), relay the message and help fix it before retrying.
+3. Run `setup` with `{"remote":"gh"}` or `{"remote":"git","repoUrl":"..."}`. On a typed error (`gh-not-installed`, `gh-not-authenticated`, `invalid-repo-url`, `clone-failed`), relay the message and help fix it before retrying. A forced re-clone refuses with `unpushed-commits` when the clone holds commits on no remote ref: run `transport-abort` first if a transport is in progress, and add `discardLocal:true` only after the user confirms discarding them.
 4. Suggest `/git-agents sync unify` as the next step.
 
 ### sync

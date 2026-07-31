@@ -369,9 +369,18 @@ export async function runTransportBegin(
     if (!emptyRemote) {
       const conflicted = await conflictedEntries(deps.configDir);
       if (conflicted.size === 0) {
+        if (error.includes("refusing to merge unrelated histories")) {
+          throw new InternalCommandError(
+            "unrelated-histories",
+            "The remote history was rewritten and no longer shares a base with the local clone. " +
+              "Run transport-abort to restore the pre-sync state, then re-clone with setup force:true, " +
+              "then run the sync again. Local harness files are not affected.",
+          );
+        }
         throw new InternalCommandError(
           "transport-failed",
-          `Could not merge from origin: ${error || "unknown error"}`,
+          `Could not merge from origin: ${error || "unknown error"}. ` +
+            "The clone is mid-transport; run transport-abort to restore the pre-sync state.",
         );
       }
       const conflicts: ConflictFile[] = [];
@@ -491,6 +500,9 @@ export type TransportCommitResult = {
   mergeCompleted: boolean;
   mirroredBack: PathChange[];
   pushed: boolean;
+  // True only when the caller asked for deferPush: distinguishes a
+  // deliberately skipped push from one that never happened.
+  pushDeferred: boolean;
 };
 
 export async function runTransportCommit(
@@ -557,7 +569,7 @@ export async function runTransportCommit(
 
   writeLastSyncedPaths(deps);
   clearTransportState(deps.configDir);
-  return { mergeCompleted, mirroredBack, pushed };
+  return { mergeCompleted, mirroredBack, pushed, pushDeferred: deferPush };
 }
 
 export type TransportAbortResult = { aborted: boolean; message: string };
