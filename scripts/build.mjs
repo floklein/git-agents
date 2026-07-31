@@ -4,7 +4,7 @@ import { build } from "esbuild";
 await rm("dist", { recursive: true, force: true });
 
 await build({
-  entryPoints: ["src/index.tsx"],
+  entryPoints: ["src/index.ts"],
   outfile: "dist/index.js",
   bundle: true,
   platform: "node",

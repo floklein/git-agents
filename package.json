@@ -1,7 +1,7 @@
 {
   "name": "git-agents",
-  "version": "0.4.0",
-  "description": "TUI CLI to sync portable AI coding harness files across machines using git",
+  "version": "1.0.0",
+  "description": "Agent skill to sync portable AI coding harness files and global instructions across machines and harnesses using git",
   "type": "module",
   "license": "MIT",
   "author": "Florent Klein",
@@ -32,11 +32,12 @@
   },
   "files": [
     "dist",
+    "skills",
     "README.md"
   ],
   "scripts": {
-    "dev": "tsx watch src/index.tsx",
-    "start": "tsx src/index.tsx",
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -44,18 +45,11 @@
     "prepack": "npm run build"
   },
   "dependencies": {
-    "ink": "^7.1.1",
-    "ink-big-text": "^2.0.0",
-    "ink-text-input": "^6.0.0",
-    "react": "^19.2.4",
     "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@types/ink-big-text": "^1.2.4",
     "@types/node": "^22.20.1",
-    "@types/react": "^19.2.0",
     "esbuild": "^0.28.1",
-    "ink-testing-library": "^4.0.0",
     "tsx": "^4.23.1",
     "typescript": "^5.9.3",
     "vitest": "^4.1.10"
