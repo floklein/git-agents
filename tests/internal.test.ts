@@ -71,7 +71,13 @@ describe("runInternalCommand", () => {
         expect(syncPath.contentHash).toBeUndefined();
       }
     }
-    expect(status.drift.available).toBe(false);
+    expect(status.drift.available).toBe(true);
+    expect(status.drift.files).toEqual({
+      claude: "missing",
+      codex: "missing",
+      gemini: "missing",
+      opencode: "missing",
+    });
   });
 
   it("status reports config, clone, and per-path hashes when present", () => {

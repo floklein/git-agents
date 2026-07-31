@@ -12,6 +12,7 @@ import {
   readCanonical,
   type GeneratedTarget,
 } from "../canonical/canonical";
+import { driftStateOf, gatherDrift, type DriftState } from "../canonical/gather";
 import type { SyncPathSnapshot } from "../types";
 
 export type InternalDeps = {
@@ -69,7 +70,7 @@ export type StatusReport = {
   generated: GeneratedFileReport[];
   manifestError?: string;
   harnesses: HarnessReport[];
-  drift: { available: false; reason: string };
+  drift: { available: true; files: Record<string, DriftState> };
 };
 
 function generatedFileState(
@@ -138,6 +139,13 @@ function runStatus(deps: InternalDeps): StatusReport {
     }),
   }));
 
+  const driftFiles = Object.fromEntries(
+    gatherDrift(deps.configDir, deps.homeDir).files.map((file) => [
+      file.harness,
+      driftStateOf(file),
+    ]),
+  );
+
   return {
     configured: config !== null,
     config,
@@ -146,13 +154,14 @@ function runStatus(deps: InternalDeps): StatusReport {
     generated,
     ...(manifestError !== undefined ? { manifestError } : {}),
     harnesses,
-    drift: { available: false, reason: "Drift detection not implemented yet" },
+    drift: { available: true, files: driftFiles },
   };
 }
 
 const COMMANDS: Record<string, (deps: InternalDeps, input: unknown) => unknown> = {
   status: runStatus,
   propagate: (deps) => propagateCanonical(deps.configDir, deps.homeDir),
+  gather: (deps) => gatherDrift(deps.configDir, deps.homeDir),
 };
 
 export function runInternalCommand(
