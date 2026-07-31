@@ -5,7 +5,12 @@ import { AGENT_DEFS } from "../utils/agentDefs";
 import { snapshotSyncPath } from "../utils/agents";
 import { CONFIG_DIR, CONFIG_FILE, getLocalSyncPath, readConfig } from "../utils/config";
 import { readSyncManifest, type SyncManifest } from "../utils/manifest";
-import { propagateCanonical, type GeneratedTarget } from "../canonical/canonical";
+import {
+  canonicalCorePath,
+  canonicalOverlayPath,
+  propagateCanonical,
+  type GeneratedTarget,
+} from "../canonical/canonical";
 import { driftStateOf, gatherDrift, type DriftState } from "../canonical/gather";
 import { runApply, runStage } from "../canonical/stage";
 import { runSyncCommand, type SyncFlowDeps } from "./sync";
@@ -23,8 +28,14 @@ export type InternalDeps = {
   setup?: SetupFlowDeps;
 };
 
+// GIT_AGENTS_HOME / GIT_AGENTS_CONFIG_DIR are unofficial overrides for
+// sandboxed end-to-end testing; real runs never set them.
 export function defaultInternalDeps(): InternalDeps {
-  return { homeDir: homedir(), configDir: CONFIG_DIR, configFile: CONFIG_FILE };
+  const homeDir = process.env.GIT_AGENTS_HOME || homedir();
+  const configDir = process.env.GIT_AGENTS_CONFIG_DIR || CONFIG_DIR;
+  const configFile =
+    configDir === CONFIG_DIR ? CONFIG_FILE : join(configDir, "config.json");
+  return { homeDir, configDir, configFile };
 }
 
 function syncFlowDeps(deps: InternalDeps): SyncFlowDeps {
@@ -174,6 +185,13 @@ const COMMANDS: Record<
   push: (deps, input) => runSyncCommand("push", deps, input, syncFlowDeps(deps)),
   setup: (deps, input) =>
     runSetup(deps, input, deps.setup ?? defaultSetupFlowDeps(deps)),
+  "install-pointer-docs": (deps) => ({
+    settingsPath: "Cursor Settings > Rules > User Rules",
+    rule:
+      `At the start of each session, read the file ${canonicalCorePath(deps.configDir)} ` +
+      `and follow its contents as global instructions. If ${canonicalOverlayPath(deps.configDir, "cursor")} ` +
+      "exists, read and follow it as well.",
+  }),
 };
 
 export async function runInternalCommand(
