@@ -35,3 +35,6 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Claude Code worktrees (agent scratch space)
+.claude/worktrees/
