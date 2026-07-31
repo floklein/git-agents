@@ -13,6 +13,8 @@ import {
   type GeneratedTarget,
 } from "../canonical/canonical";
 import { driftStateOf, gatherDrift, type DriftState } from "../canonical/gather";
+import { runApply, runStage } from "../canonical/stage";
+import { InternalCommandError } from "./errors";
 import type { SyncPathSnapshot } from "../types";
 
 export type InternalDeps = {
@@ -162,6 +164,8 @@ const COMMANDS: Record<string, (deps: InternalDeps, input: unknown) => unknown> 
   status: runStatus,
   propagate: (deps) => propagateCanonical(deps.configDir, deps.homeDir),
   gather: (deps) => gatherDrift(deps.configDir, deps.homeDir),
+  stage: (deps, input) => runStage(deps.configDir, deps.homeDir, input),
+  apply: (deps) => runApply(deps.configDir, deps.homeDir),
 };
 
 export function runInternalCommand(
@@ -185,7 +189,7 @@ export function runInternalCommand(
     return {
       ok: false,
       error: {
-        code: "command-failed",
+        code: error instanceof InternalCommandError ? error.code : "command-failed",
         message: error?.message ?? String(error),
       },
     };
