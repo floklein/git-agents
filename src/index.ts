@@ -19,10 +19,17 @@ Everything else happens inside your coding agent:
 
 function bootstrap(): void {
   console.log("Installing the git-agents skill into your harnesses...\n");
-  const install = spawnSync("npx", ["-y", "skills", "add", SKILL_SOURCE], {
-    stdio: "inherit",
-    shell: process.platform === "win32",
-  });
+  // On Windows npx is a .cmd, which needs a shell; pass the command as a
+  // single string there so Node does not warn about unescaped args (DEP0190).
+  const install =
+    process.platform === "win32"
+      ? spawnSync(`npx -y skills add ${SKILL_SOURCE}`, {
+          stdio: "inherit",
+          shell: true,
+        })
+      : spawnSync("npx", ["-y", "skills", "add", SKILL_SOURCE], {
+          stdio: "inherit",
+        });
 
   if (install.status === 0) {
     console.log("\nDone. Open your coding agent and run: /git-agents setup");
