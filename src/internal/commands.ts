@@ -16,6 +16,7 @@ import { driftStateOf, gatherDrift, type DriftState } from "../canonical/gather"
 import { runApply, runStage } from "../canonical/stage";
 import { runSyncCommand, type SyncFlowDeps } from "./sync";
 import { defaultSetupFlowDeps, runSetup, type SetupFlowDeps } from "./setup";
+import { detectCaveats, type Caveat } from "./caveats";
 import { gitAddCommitPush, gitPull } from "../utils/shell";
 import { InternalCommandError } from "./errors";
 import type { SyncPathSnapshot } from "../types";
@@ -82,6 +83,7 @@ export type StatusReport = {
   manifestError?: string;
   harnesses: HarnessReport[];
   drift: { available: true; files: Record<string, DriftState> };
+  caveats: Caveat[];
 };
 
 function generatedFileState(
@@ -166,6 +168,7 @@ function runStatus(deps: InternalDeps): StatusReport {
     ...(manifestError !== undefined ? { manifestError } : {}),
     harnesses,
     drift: { available: true, files: driftFiles },
+    caveats: detectCaveats(deps),
   };
 }
 
