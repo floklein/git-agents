@@ -15,6 +15,7 @@ import {
 import { driftStateOf, gatherDrift, type DriftState } from "../canonical/gather";
 import { runApply, runStage } from "../canonical/stage";
 import { runSyncCommand, type SyncFlowDeps } from "./sync";
+import { defaultSetupFlowDeps, runSetup, type SetupFlowDeps } from "./setup";
 import { gitAddCommitPush, gitPull } from "../utils/shell";
 import { InternalCommandError } from "./errors";
 import type { SyncPathSnapshot } from "../types";
@@ -24,6 +25,7 @@ export type InternalDeps = {
   configDir: string;
   configFile: string;
   sync?: SyncFlowDeps;
+  setup?: SetupFlowDeps;
 };
 
 export function defaultInternalDeps(): InternalDeps {
@@ -178,6 +180,8 @@ const COMMANDS: Record<
   apply: (deps) => runApply(deps.configDir, deps.homeDir),
   pull: (deps, input) => runSyncCommand("pull", deps, input, syncFlowDeps(deps)),
   push: (deps, input) => runSyncCommand("push", deps, input, syncFlowDeps(deps)),
+  setup: (deps, input) =>
+    runSetup(deps, input, deps.setup ?? defaultSetupFlowDeps(deps)),
 };
 
 export async function runInternalCommand(
