@@ -18,8 +18,3 @@ export type SyncPathSnapshot = {
 };
 
 export type SyncPathStatus = "added" | "removed" | "modified" | "unchanged";
-
-export type Screen =
-  | { id: "setup"; existingConfig?: Config }
-  | { id: "main" }
-  | { id: "sync"; mode: "pull" | "push" };

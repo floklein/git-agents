@@ -30,7 +30,6 @@ export const AGENT_DEFS: AgentDef[] = [
     name: "Cursor",
     syncPaths: [
       ".cursor/agents",
-      ".cursor/rules",
       ".cursor/skills",
       ".cursor/commands",
     ],

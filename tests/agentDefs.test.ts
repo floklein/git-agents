@@ -28,7 +28,6 @@ const EXPECTED_MANIFESTS = [
     name: "Cursor",
     syncPaths: [
       ".cursor/agents",
-      ".cursor/rules",
       ".cursor/skills",
       ".cursor/commands",
     ],
