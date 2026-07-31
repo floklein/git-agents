@@ -49,7 +49,7 @@ const StageFileSchema = z.object({
   version: z.literal(1),
   proposal: z.object({
     core: z.string(),
-    overlays: z.record(z.string()),
+    overlays: z.record(HarnessSchema, z.string()),
   }),
   proposalVersion: z.string(),
   inputs: InputsSchema,
@@ -143,8 +143,10 @@ export function runStage(
   for (const target of GENERATED_TARGETS) {
     const rendered = renderGeneratedFile(proposal, target.harness);
     const currentFile = current.files.find((f) => f.harness === target.harness);
+    // Normalized like gather, so the gate cannot show drift that the
+    // drift summary denies (CRLF conversion is not a content change).
     const before = currentFile?.present
-      ? readFileSync(currentFile.path, "utf8")
+      ? readFileSync(currentFile.path, "utf8").replace(/\r\n/g, "\n")
       : "";
     files.push({
       path: target.syncPath,

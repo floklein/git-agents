@@ -84,6 +84,13 @@ export async function runSyncCommand(
   if (!parsed.success) throw invalidInputError(mode, parsed.error);
   const input = parsed.data;
 
+  if (input?.execute && !input.expected) {
+    throw new InternalCommandError(
+      "invalid-input",
+      `${mode} with execute:true requires the previewed rows as "expected"; run a preview first and pass its rows back.`,
+    );
+  }
+
   const load = await runSyncLoad(
     mode,
     AGENT_DEFS,

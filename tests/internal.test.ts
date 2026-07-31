@@ -75,7 +75,6 @@ describe("runInternalCommand", () => {
         expect(syncPath.contentHash).toBeUndefined();
       }
     }
-    expect(status.drift.available).toBe(true);
     expect(status.drift.files).toEqual({
       claude: "missing",
       codex: "missing",

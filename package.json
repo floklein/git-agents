@@ -7,8 +7,8 @@
   "author": "Florent Klein",
   "keywords": [
     "git",
-    "tui",
     "cli",
+    "skill",
     "claude",
     "codex",
     "cursor",
@@ -16,8 +16,7 @@
     "opencode",
     "agents",
     "skills",
-    "sync",
-    "worktree"
+    "sync"
   ],
   "repository": {
     "type": "git",

@@ -125,10 +125,14 @@ describe("runSyncCommand", () => {
       "utf8",
     );
 
+    const preview = await runSyncCommand("pull", deps, undefined, flowDeps);
+    const expected = preview.agents.flatMap((agent) =>
+      agent.paths.map((path) => ({ agentId: agent.agentId, ...path })),
+    );
     const result = await runSyncCommand(
       "pull",
       deps,
-      { execute: true },
+      { execute: true, expected },
       flowDeps,
     );
 
@@ -136,6 +140,18 @@ describe("runSyncCommand", () => {
     expect(
       readFileSync(join(deps.homeDir, ".gemini", "GEMINI.md"), "utf8"),
     ).toBe("# from remote\n");
+  });
+
+  it("refuses execute without the previewed rows", async () => {
+    const { deps: flowDeps } = fakeFlowDeps();
+
+    try {
+      await runSyncCommand("pull", makeDeps(), { execute: true }, flowDeps);
+      expect.unreachable();
+    } catch (error) {
+      expect(error).toBeInstanceOf(InternalCommandError);
+      expect((error as InternalCommandError).code).toBe("invalid-input");
+    }
   });
 
   it("surfaces pull failures as sync-load-failed", async () => {

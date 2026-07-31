@@ -14,6 +14,19 @@ npx -y git-agents --internal <command> [--input <json>]
 
 Every command prints exactly one JSON envelope: `{"ok":true,"result":...}` or `{"ok":false,"error":{"code":"...","message":"..."}}`. Relay error messages with their remedy; never edit synced files by hand; never write anything except through the gate below.
 
+The command surface:
+
+| Command | Effect | Writes? |
+| --- | --- | --- |
+| `status` | Config, canonical version, generated states, drift, caveats | no |
+| `setup` | Onboarding: remote choice, repo creation, clone | clone + config |
+| `pull` / `push` | Machine sync: preview, then execute with the previewed rows | on execute |
+| `gather` | Collect drift vs canonical with attribution and input hashes | no |
+| `stage` | Accept a proposed canonical, render exact diffs | stage file |
+| `apply` | Write the staged canonical and regenerate all copies | gated |
+| `propagate` | Regenerate harness copies from the current canonical | gated |
+| `install-pointer-docs` | Print the Cursor pointer rule with resolved paths | no |
+
 ## Router
 
 The first word of the arguments selects the subcommand: `setup`, `sync`, `pull`, `push`, `status`. With no argument, or an unknown one, run the status subcommand and list the subcommands. Before any subcommand, if `status` reports `clonePresent: false`, run the setup branch first, then offer to continue what was originally asked.
@@ -39,7 +52,8 @@ Run `status`. Report concisely: configured and clone state, canonical version, e
 
 1. Run `pull` with no input and present the per-path changes grouped by harness (status plus hashes are in the result).
 2. Gate: confirm with the user.
-3. Run `pull` with `{"execute":true,"expected":[...]}` where `expected` is every previewed row flattened as `{agentId,path,status,localHash,remoteHash}`. On `stale-inputs`, re-preview and re-confirm.
+3. Run `pull` with `{"execute":true,"expected":[...]}` where `expected` is every previewed row flattened as `{agentId,path,status,localHash,remoteHash}`. Execute refuses to run without `expected`. On `stale-inputs`, re-preview and re-confirm.
+4. Run `status`; if any generated file is `stale` (the pulled canonical is newer than its copies), run `propagate` and report which copies were regenerated.
 
 ### push
 

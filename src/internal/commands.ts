@@ -87,7 +87,7 @@ export type StatusReport = {
   generated: GeneratedFileReport[];
   manifestError?: string;
   harnesses: HarnessReport[];
-  drift: { available: true; files: Record<string, DriftState> };
+  drift: { files: Record<string, DriftState> };
   caveats: Caveat[];
 };
 
@@ -163,7 +163,6 @@ function runStatus(deps: InternalDeps): StatusReport {
     ...(manifestError !== undefined ? { manifestError } : {}),
     harnesses,
     drift: {
-      available: true,
       files: Object.fromEntries(
         gathered.files.map((file) => [file.harness, driftStateOf(file)]),
       ),

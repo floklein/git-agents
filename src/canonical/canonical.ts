@@ -146,7 +146,9 @@ export function propagateCanonical(
     const content = renderGeneratedFile(canonical, target.harness);
     const path = getLocalSyncPath(target.syncPath, homeDir);
     const existing = existsSync(path) ? readFileSync(path, "utf8") : null;
-    const changed = existing !== content;
+    // CRLF-equal counts as unchanged, matching gather and stage.
+    const changed =
+      existing === null || existing.replace(/\r\n/g, "\n") !== content;
     if (changed) {
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, content, "utf8");

@@ -45,7 +45,7 @@ If you skip step 2, any other subcommand routes you into setup first.
 | `/git-agents push` | Send this machine's files to the remote. |
 | `/git-agents status` | Config, canonical version, per-file state, drift, and caveats. Read-only. |
 
-Every write is gated: the scripts render exact per-file diffs, and nothing happens until you explicitly confirm. In Codex invoke with `$git-agents <subcommand>`; Gemini CLI shows a consent prompt on skill activation, which is expected.
+Every write is gated: the scripts render exact per-file diffs, and nothing happens until you explicitly confirm. Per harness: Claude Code and Cursor use `/git-agents <subcommand>`, Codex uses `$git-agents <subcommand>`, OpenCode invokes it through its skill tool, and Gemini CLI shows a consent prompt on skill activation, which is expected.
 
 ## The canonical model
 
@@ -62,7 +62,7 @@ Each harness file is generated as core plus overlay, wrapped in `ga:` markers so
 
 ### Cursor
 
-Cursor has no global instructions file, so it receives no generated copy. This is a documented limitation, not a bug. Opt-in bridge: a one-time manual User Rule pointing Cursor at the canonical file; the skill walks you through it (`/git-agents status` will remind you, and `npx git-agents --internal install-pointer-docs` prints the rule text).
+Cursor has no global instructions file, so it receives no generated copy. This is a documented limitation, not a bug. Opt-in bridge: a one-time manual User Rule pointing Cursor at the canonical file; ask the skill about Cursor and it walks you through adding the rule, exact paths included.
 
 ## Synced paths
 
