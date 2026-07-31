@@ -28,8 +28,8 @@ function makeDeps(): InternalDeps {
   return { homeDir, configDir, configFile: join(configDir, "config.json") };
 }
 
-function statusResult(deps: InternalDeps): StatusReport {
-  const outcome = runInternalCommand("status", undefined, deps);
+async function statusResult(deps: InternalDeps): Promise<StatusReport> {
+  const outcome = await runInternalCommand("status", undefined, deps);
   expect(outcome.ok).toBe(true);
   if (!outcome.ok) throw new Error("unreachable");
   return outcome.result as StatusReport;
@@ -43,8 +43,12 @@ afterEach(() => {
 });
 
 describe("runInternalCommand", () => {
-  it("reports an unknown command as a structured error", () => {
-    const outcome = runInternalCommand("does-not-exist", undefined, makeDeps());
+  it("reports an unknown command as a structured error", async () => {
+    const outcome = await runInternalCommand(
+      "does-not-exist",
+      undefined,
+      makeDeps(),
+    );
 
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) {
@@ -53,8 +57,8 @@ describe("runInternalCommand", () => {
     }
   });
 
-  it("status reports an unconfigured machine truthfully", () => {
-    const status = statusResult(makeDeps());
+  it("status reports an unconfigured machine truthfully", async () => {
+    const status = await statusResult(makeDeps());
 
     expect(status.configured).toBe(false);
     expect(status.config).toBeNull();
@@ -80,7 +84,7 @@ describe("runInternalCommand", () => {
     });
   });
 
-  it("status reports config, clone, and per-path hashes when present", () => {
+  it("status reports config, clone, and per-path hashes when present", async () => {
     const deps = makeDeps();
     writeFileSync(deps.configFile, JSON.stringify({ remote: "gh" }), "utf8");
     mkdirSync(join(deps.configDir, ".git"), { recursive: true });
@@ -89,7 +93,7 @@ describe("runInternalCommand", () => {
     const claudeMd = join(claudeDir, "CLAUDE.md");
     writeFileSync(claudeMd, "# instructions\n", "utf8");
 
-    const status = statusResult(deps);
+    const status = await statusResult(deps);
 
     expect(status.configured).toBe(true);
     expect(status.config).toEqual({ remote: "gh" });
@@ -105,7 +109,7 @@ describe("runInternalCommand", () => {
     expect(entry.contentHash).toBe(snapshotSyncPath(claudeMd)!.contentHash);
   });
 
-  it("status tracks generated-file staleness across the canonical lifecycle", () => {
+  it("status tracks generated-file staleness across the canonical lifecycle", async () => {
     const deps = makeDeps();
     mkdirSync(join(deps.configDir, "canonical"), { recursive: true });
     writeFileSync(
@@ -114,32 +118,32 @@ describe("runInternalCommand", () => {
       "utf8",
     );
 
-    let states = () =>
+    const states = async () =>
       Object.fromEntries(
-        statusResult(deps).generated.map((g) => [g.harness, g.state]),
+        (await statusResult(deps)).generated.map((g) => [g.harness, g.state]),
       );
-    expect(states().claude).toBe("missing");
+    expect((await states()).claude).toBe("missing");
 
-    const propagate = runInternalCommand("propagate", undefined, deps);
+    const propagate = await runInternalCommand("propagate", undefined, deps);
     expect(propagate.ok).toBe(true);
-    expect(states().claude).toBe("current");
-    expect(states().codex).toBe("current");
+    expect((await states()).claude).toBe("current");
+    expect((await states()).codex).toBe("current");
 
     const claudeMd = join(deps.homeDir, ".claude", "CLAUDE.md");
     writeFileSync(claudeMd, "# hand-edited\n", "utf8");
-    expect(states().claude).toBe("modified");
-    expect(states().codex).toBe("current");
+    expect((await states()).claude).toBe("modified");
+    expect((await states()).codex).toBe("current");
 
     writeFileSync(
       join(deps.configDir, "canonical", "core.md"),
       "# Core v2\n",
       "utf8",
     );
-    expect(states().codex).toBe("stale");
+    expect((await states()).codex).toBe("stale");
   });
 
-  it("status output survives a JSON round trip unchanged", () => {
-    const outcome = runInternalCommand("status", undefined, makeDeps());
+  it("status output survives a JSON round trip unchanged", async () => {
+    const outcome = await runInternalCommand("status", undefined, makeDeps());
 
     expect(JSON.parse(JSON.stringify(outcome))).toEqual(outcome);
   });
@@ -181,14 +185,14 @@ describe("parseInternalArgs", () => {
 });
 
 describe("runInternalCli", () => {
-  function captureRun(args: string[]) {
+  async function captureRun(args: string[]) {
     const lines: string[] = [];
-    const exitCode = runInternalCli(args, (line) => lines.push(line));
+    const exitCode = await runInternalCli(args, (line) => lines.push(line));
     return { lines, exitCode };
   }
 
-  it("emits exactly one JSON document and exit 0 on success", () => {
-    const { lines, exitCode } = captureRun(["status"]);
+  it("emits exactly one JSON document and exit 0 on success", async () => {
+    const { lines, exitCode } = await captureRun(["status"]);
 
     expect(exitCode).toBe(0);
     expect(lines).toHaveLength(1);
@@ -196,8 +200,8 @@ describe("runInternalCli", () => {
     expect(outcome.ok).toBe(true);
   });
 
-  it("emits exactly one JSON document and exit 1 on errors", () => {
-    const { lines, exitCode } = captureRun(["does-not-exist"]);
+  it("emits exactly one JSON document and exit 1 on errors", async () => {
+    const { lines, exitCode } = await captureRun(["does-not-exist"]);
 
     expect(exitCode).toBe(1);
     expect(lines).toHaveLength(1);
@@ -206,8 +210,8 @@ describe("runInternalCli", () => {
     expect(outcome.error.code).toBe("unknown-command");
   });
 
-  it("turns parse failures into the same JSON envelope", () => {
-    const { lines, exitCode } = captureRun([]);
+  it("turns parse failures into the same JSON envelope", async () => {
+    const { lines, exitCode } = await captureRun([]);
 
     expect(exitCode).toBe(1);
     const outcome = JSON.parse(lines[0]!);

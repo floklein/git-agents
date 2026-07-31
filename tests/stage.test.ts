@@ -219,7 +219,7 @@ describe("runApply", () => {
     expect(drift.files.every((f) => f.present)).toBe(true);
   });
 
-  it("refuses with stale-inputs when a file changed after stage", () => {
+  it("refuses with stale-inputs when a file changed after stage", async () => {
     const { configDir, homeDir } = makeDirs();
     seedCanonical(configDir, "# Core\n");
     propagateCanonical(configDir, homeDir);
@@ -240,7 +240,7 @@ describe("runApply", () => {
       configDir,
       configFile: join(configDir, "config.json"),
     };
-    const outcome = runInternalCommand("apply", undefined, deps);
+    const outcome = await runInternalCommand("apply", undefined, deps);
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) expect(outcome.error.code).toBe("stale-inputs");
   });

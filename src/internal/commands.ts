@@ -14,6 +14,8 @@ import {
 } from "../canonical/canonical";
 import { driftStateOf, gatherDrift, type DriftState } from "../canonical/gather";
 import { runApply, runStage } from "../canonical/stage";
+import { runSyncCommand, type SyncFlowDeps } from "./sync";
+import { gitAddCommitPush, gitPull } from "../utils/shell";
 import { InternalCommandError } from "./errors";
 import type { SyncPathSnapshot } from "../types";
 
@@ -21,10 +23,15 @@ export type InternalDeps = {
   homeDir: string;
   configDir: string;
   configFile: string;
+  sync?: SyncFlowDeps;
 };
 
 export function defaultInternalDeps(): InternalDeps {
   return { homeDir: homedir(), configDir: CONFIG_DIR, configFile: CONFIG_FILE };
+}
+
+function syncFlowDeps(deps: InternalDeps): SyncFlowDeps {
+  return deps.sync ?? { gitPull, gitAddCommitPush };
 }
 
 export type InternalError = { code: string; message: string };
@@ -160,19 +167,24 @@ function runStatus(deps: InternalDeps): StatusReport {
   };
 }
 
-const COMMANDS: Record<string, (deps: InternalDeps, input: unknown) => unknown> = {
+const COMMANDS: Record<
+  string,
+  (deps: InternalDeps, input: unknown) => unknown | Promise<unknown>
+> = {
   status: runStatus,
   propagate: (deps) => propagateCanonical(deps.configDir, deps.homeDir),
   gather: (deps) => gatherDrift(deps.configDir, deps.homeDir),
   stage: (deps, input) => runStage(deps.configDir, deps.homeDir, input),
   apply: (deps) => runApply(deps.configDir, deps.homeDir),
+  pull: (deps, input) => runSyncCommand("pull", deps, input, syncFlowDeps(deps)),
+  push: (deps, input) => runSyncCommand("push", deps, input, syncFlowDeps(deps)),
 };
 
-export function runInternalCommand(
+export async function runInternalCommand(
   name: string,
   input: unknown,
   deps: InternalDeps,
-): InternalOutcome {
+): Promise<InternalOutcome> {
   const command = COMMANDS[name];
   if (!command) {
     return {
@@ -184,7 +196,7 @@ export function runInternalCommand(
     };
   }
   try {
-    return { ok: true, result: command(deps, input) };
+    return { ok: true, result: await command(deps, input) };
   } catch (error: any) {
     return {
       ok: false,

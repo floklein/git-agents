@@ -4,7 +4,7 @@ const args = process.argv.slice(2);
 
 if (args[0] === "--internal") {
   const { runInternalCli } = await import("./internal/cli");
-  process.exitCode = runInternalCli(args.slice(1));
+  process.exitCode = await runInternalCli(args.slice(1));
 } else {
   const [{ render }, { readConfig }, { App }] = await Promise.all([
     import("ink"),

@@ -39,17 +39,21 @@ export function parseInternalArgs(args: string[]): ParsedArgs {
   return { command, input };
 }
 
-export function runInternalCli(
+export async function runInternalCli(
   args: string[],
   write: (line: string) => void = (line) => process.stdout.write(line),
-): number {
+): Promise<number> {
   let outcome: InternalOutcome;
   try {
     const parsed = parseInternalArgs(args);
     outcome =
       "error" in parsed
         ? { ok: false, error: parsed.error }
-        : runInternalCommand(parsed.command, parsed.input, defaultInternalDeps());
+        : await runInternalCommand(
+            parsed.command,
+            parsed.input,
+            defaultInternalDeps(),
+          );
   } catch (error: any) {
     outcome = {
       ok: false,
