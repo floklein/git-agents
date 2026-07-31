@@ -60,6 +60,10 @@ describe("runInternalCommand", () => {
     expect(status.config).toBeNull();
     expect(status.clonePresent).toBe(false);
     expect(status.canonicalVersion).toBeNull();
+    expect(status.generated).toHaveLength(4);
+    for (const generated of status.generated) {
+      expect(generated.state).toBe("no-canonical");
+    }
     expect(status.harnesses).toHaveLength(5);
     for (const harness of status.harnesses) {
       for (const syncPath of harness.syncPaths) {
@@ -93,6 +97,39 @@ describe("runInternalCommand", () => {
     expect(entry.kind).toBe("file");
     expect(entry.path).toBe(claudeMd);
     expect(entry.contentHash).toBe(snapshotSyncPath(claudeMd)!.contentHash);
+  });
+
+  it("status tracks generated-file staleness across the canonical lifecycle", () => {
+    const deps = makeDeps();
+    mkdirSync(join(deps.configDir, "canonical"), { recursive: true });
+    writeFileSync(
+      join(deps.configDir, "canonical", "core.md"),
+      "# Core\n",
+      "utf8",
+    );
+
+    let states = () =>
+      Object.fromEntries(
+        statusResult(deps).generated.map((g) => [g.harness, g.state]),
+      );
+    expect(states().claude).toBe("missing");
+
+    const propagate = runInternalCommand("propagate", undefined, deps);
+    expect(propagate.ok).toBe(true);
+    expect(states().claude).toBe("current");
+    expect(states().codex).toBe("current");
+
+    const claudeMd = join(deps.homeDir, ".claude", "CLAUDE.md");
+    writeFileSync(claudeMd, "# hand-edited\n", "utf8");
+    expect(states().claude).toBe("modified");
+    expect(states().codex).toBe("current");
+
+    writeFileSync(
+      join(deps.configDir, "canonical", "core.md"),
+      "# Core v2\n",
+      "utf8",
+    );
+    expect(states().codex).toBe("stale");
   });
 
   it("status output survives a JSON round trip unchanged", () => {

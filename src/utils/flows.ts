@@ -1,17 +1,11 @@
 import { homedir } from "os";
-import {
-  closeSync,
-  fstatSync,
-  lstatSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from "fs";
-import { randomUUID } from "crypto";
-import { isAbsolute, join } from "path";
 import { getLocalSyncPath, getRemoteSyncPath } from "./config";
+import {
+  readSyncManifest,
+  writeSyncManifest,
+  SYNC_MANIFEST_FILE,
+  type SyncManifest,
+} from "./manifest";
 import {
   compareSyncPathSnapshots,
   mirrorSyncPath,
@@ -168,115 +162,7 @@ export type SyncLoadResult =
   | { type: "ok"; agentDiffs: AgentDiffEntry[] }
   | { type: "error"; message: string };
 
-export const SYNC_MANIFEST_FILE = ".git-agents-sync.json";
-
-type SyncManifest = {
-  version: 1;
-  paths: string[];
-};
-
-function isSafeManifestPath(path: unknown): path is string {
-  if (
-    typeof path !== "string" ||
-    !path ||
-    path.trim() !== path ||
-    path.includes("\\") ||
-    isAbsolute(path) ||
-    /^[A-Za-z]:\//.test(path)
-  ) {
-    return false;
-  }
-
-  return path
-    .split("/")
-    .every((segment) => segment !== "" && segment !== "." && segment !== "..");
-}
-
-function readSyncManifest(configDir: string): SyncManifest | null {
-  const manifestPath = join(configDir, SYNC_MANIFEST_FILE);
-  let manifestStat;
-  try {
-    manifestStat = lstatSync(manifestPath);
-  } catch (error: any) {
-    if (error?.code === "ENOENT") return null;
-    throw error;
-  }
-  if (manifestStat.isSymbolicLink() || !manifestStat.isFile()) {
-    throw new Error(`${SYNC_MANIFEST_FILE} must be a regular file`);
-  }
-
-  let descriptor: number | undefined;
-  let text: string;
-  try {
-    descriptor = openSync(manifestPath, "r");
-    const openedStat = fstatSync(descriptor);
-    if (
-      !openedStat.isFile() ||
-      openedStat.dev !== manifestStat.dev ||
-      openedStat.ino !== manifestStat.ino
-    ) {
-      throw new Error(`${SYNC_MANIFEST_FILE} changed while it was being read`);
-    }
-    text = readFileSync(descriptor, "utf8");
-  } finally {
-    if (descriptor !== undefined) closeSync(descriptor);
-  }
-
-  let value: unknown;
-  try {
-    value = JSON.parse(text);
-  } catch {
-    throw new Error(`${SYNC_MANIFEST_FILE} is not valid JSON`);
-  }
-
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    !("version" in value) ||
-    value.version !== 1 ||
-    !("paths" in value) ||
-    !Array.isArray(value.paths) ||
-    !value.paths.every(isSafeManifestPath)
-  ) {
-    throw new Error(`${SYNC_MANIFEST_FILE} has an unsupported format`);
-  }
-
-  return {
-    version: 1,
-    paths: [...new Set(value.paths)],
-  };
-}
-
-function writeSyncManifest(configDir: string, paths: Iterable<string>): void {
-  const manifest: SyncManifest = {
-    version: 1,
-    paths: [...new Set(paths)].sort(),
-  };
-  const manifestPath = join(configDir, SYNC_MANIFEST_FILE);
-  try {
-    const existing = lstatSync(manifestPath);
-    if (existing.isSymbolicLink() || !existing.isFile()) {
-      throw new Error(`${SYNC_MANIFEST_FILE} must be a regular file`);
-    }
-  } catch (error: any) {
-    if (error?.code !== "ENOENT") throw error;
-  }
-
-  const temporaryPath = join(
-    configDir,
-    `.${SYNC_MANIFEST_FILE}.git-agents-${randomUUID()}`,
-  );
-  try {
-    writeFileSync(
-      temporaryPath,
-      `${JSON.stringify(manifest, null, 2)}\n`,
-      { encoding: "utf8", flag: "wx", mode: 0o600 },
-    );
-    renameSync(temporaryPath, manifestPath);
-  } finally {
-    rmSync(temporaryPath, { force: true });
-  }
-}
+export { SYNC_MANIFEST_FILE } from "./manifest";
 
 function snapshotsMatch(
   first: SyncPathSnapshot | null,
@@ -471,7 +357,11 @@ export async function runSyncExecute(
     const wroteManifest = agentDiffs.length > 0;
     if (wroteManifest) {
       try {
-        writeSyncManifest(configDir, initializedPaths);
+        writeSyncManifest(configDir, {
+          paths: initializedPaths,
+          canonical: manifest?.canonical,
+          generated: manifest?.generated,
+        });
       } catch (e: any) {
         return {
           type: "error",
