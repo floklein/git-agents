@@ -4,6 +4,7 @@ import {
   GENERATED_TARGETS,
   hashContent,
   readCanonical,
+  withTrailingNewline,
   type CanonicalContent,
   type GeneratedTarget,
 } from "./canonical";
@@ -36,7 +37,7 @@ export function parseGeneratedFile(content: string): MarkerParse {
   };
 
   const beginCore = BEGIN_CORE.exec(content);
-  if (!beginCore || beginCore.index === undefined) return mangled;
+  if (!beginCore) return mangled;
   const coreStart = beginCore.index + beginCore[0].length;
   const coreEnd = content.indexOf(END_CORE, coreStart);
   if (coreEnd === -1) return mangled;
@@ -101,8 +102,11 @@ export type GatherResult = {
 function gatherFileRegions(
   canonical: CanonicalContent | null,
   harness: GeneratedTarget["harness"],
-  content: string,
+  rawContent: string,
 ): Pick<GatherFile, "markers" | "generatedFromVersion" | "regions"> {
+  // CRLF conversion by editors or autocrlf must not mangle attribution.
+  const content = rawContent.replace(/\r\n/g, "\n");
+
   if (canonical === null) {
     return {
       markers: "absent",
@@ -115,9 +119,11 @@ function gatherFileRegions(
   }
 
   const parsed = parseGeneratedFile(content);
-  if (parsed.state !== "parsed") {
+  const overlayMismatch =
+    parsed.overlay !== null && parsed.overlay.harness !== harness;
+  if (parsed.state !== "parsed" || overlayMismatch) {
     return {
-      markers: parsed.state,
+      markers: parsed.state === "parsed" ? "mangled" : parsed.state,
       generatedFromVersion: null,
       regions:
         content.trim() === ""
@@ -131,7 +137,7 @@ function gatherFileRegions(
 
   regions.push({
     attribution: "core",
-    changed: parsed.core!.content.trimEnd() !== canonical.core.trimEnd(),
+    changed: parsed.core!.content !== withTrailingNewline(canonical.core),
     content: parsed.core!.content,
     canonical: canonical.core,
   });
@@ -139,7 +145,10 @@ function gatherFileRegions(
     const overlayContent = parsed.overlay?.content ?? "";
     regions.push({
       attribution: "overlay",
-      changed: overlayContent.trimEnd() !== (canonicalOverlay ?? "").trimEnd(),
+      changed:
+        canonicalOverlay === null
+          ? overlayContent !== ""
+          : overlayContent !== withTrailingNewline(canonicalOverlay),
       content: overlayContent,
       canonical: canonicalOverlay,
     });

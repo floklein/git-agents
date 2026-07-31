@@ -93,7 +93,7 @@ export function readCanonical(configDir: string): CanonicalContent | null {
   return { core, overlays, version: computeCanonicalVersion(core, overlays) };
 }
 
-function withTrailingNewline(content: string): string {
+export function withTrailingNewline(content: string): string {
   return content.endsWith("\n") ? content : `${content}\n`;
 }
 
@@ -165,15 +165,23 @@ export function propagateCanonical(
     if (overlay !== undefined) overlayHashes[harness] = hashContent(overlay);
   }
 
-  writeSyncManifest(configDir, {
-    paths: manifest?.paths ?? [],
-    canonical: {
-      version: canonical.version,
-      core: hashContent(canonical.core),
-      overlays: overlayHashes,
-    },
-    generated,
-  });
+  const canonicalSection = {
+    version: canonical.version,
+    core: hashContent(canonical.core),
+    overlays: overlayHashes,
+  };
+  const manifestUnchanged =
+    manifest !== null &&
+    JSON.stringify(manifest.canonical ?? null) ===
+      JSON.stringify(canonicalSection) &&
+    JSON.stringify(manifest.generated ?? null) === JSON.stringify(generated);
+  if (!manifestUnchanged) {
+    writeSyncManifest(configDir, {
+      paths: manifest?.paths ?? [],
+      canonical: canonicalSection,
+      generated,
+    });
+  }
 
   return { canonicalVersion: canonical.version, targets };
 }

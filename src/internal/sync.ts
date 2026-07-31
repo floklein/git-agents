@@ -5,7 +5,7 @@ import {
   runSyncLoad,
   type FlowDeps,
 } from "../utils/flows";
-import { InternalCommandError } from "./errors";
+import { InternalCommandError, invalidInputError } from "./errors";
 import type { InternalDeps } from "./commands";
 
 export type SyncFlowDeps = Pick<FlowDeps, "gitPull" | "gitAddCommitPush">;
@@ -13,7 +13,7 @@ export type SyncFlowDeps = Pick<FlowDeps, "gitPull" | "gitAddCommitPush">;
 const ExpectedPathSchema = z.object({
   agentId: z.string(),
   path: z.string(),
-  status: z.string(),
+  status: z.enum(["added", "removed", "modified", "unchanged"]),
   localHash: z.string().nullable(),
   remoteHash: z.string().nullable(),
 });
@@ -81,14 +81,7 @@ export async function runSyncCommand(
   flowDeps: SyncFlowDeps,
 ): Promise<SyncCommandResult> {
   const parsed = SyncInputSchema.safeParse(rawInput);
-  if (!parsed.success) {
-    throw new InternalCommandError(
-      "invalid-input",
-      `${mode} input does not match the expected shape: ${parsed.error.issues
-        .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
-        .join("; ")}`,
-    );
-  }
+  if (!parsed.success) throw invalidInputError(mode, parsed.error);
   const input = parsed.data;
 
   const load = await runSyncLoad(

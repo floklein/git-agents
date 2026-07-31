@@ -8,7 +8,9 @@ import {
 import { join } from "node:path";
 import { z } from "zod";
 import { unifiedDiff } from "../utils/textdiff";
-import { InternalCommandError } from "../internal/errors";
+import { SYNC_MANIFEST_FILE } from "../utils/manifest";
+import { InternalCommandError, invalidInputError } from "../internal/errors";
+import { CODEX_CAP_BYTES, CODEX_NEAR_CAP_BYTES } from "./limits";
 import {
   CANONICAL_DIR,
   CANONICAL_HARNESSES,
@@ -28,9 +30,6 @@ import { gatherDrift, type GatherResult } from "./gather";
 
 export const STAGE_FILE = ".git-agents-stage.json";
 
-const CODEX_CAP_BYTES = 32 * 1024;
-const CODEX_NEAR_CAP_BYTES = 28 * 1024;
-
 const HarnessSchema = z.enum(["claude", "codex", "gemini", "opencode", "cursor"]);
 
 const InputsSchema = z.object({
@@ -46,12 +45,17 @@ const StageInputSchema = z.object({
 
 export type StageInput = z.infer<typeof StageInputSchema>;
 
-type StageFileContent = {
-  version: 1;
-  proposal: { core: string; overlays: Record<string, string> };
-  proposalVersion: string;
-  inputs: z.infer<typeof InputsSchema>;
-};
+const StageFileSchema = z.object({
+  version: z.literal(1),
+  proposal: z.object({
+    core: z.string(),
+    overlays: z.record(z.string()),
+  }),
+  proposalVersion: z.string(),
+  inputs: InputsSchema,
+});
+
+type StageFileContent = z.infer<typeof StageFileSchema>;
 
 export type StagedFileDiff = {
   path: string;
@@ -107,14 +111,7 @@ export function runStage(
   rawInput: unknown,
 ): StageResult {
   const parsed = StageInputSchema.safeParse(rawInput);
-  if (!parsed.success) {
-    throw new InternalCommandError(
-      "invalid-input",
-      `stage input does not match the expected shape: ${parsed.error.issues
-        .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
-        .join("; ")}`,
-    );
-  }
+  if (!parsed.success) throw invalidInputError("stage", parsed.error);
   const input = parsed.data;
 
   const current = gatherDrift(configDir, homeDir);
@@ -188,7 +185,7 @@ export function runStage(
     canonicalVersion: proposal.version,
     files,
     warnings,
-    alsoUpdates: [".git-agents-sync.json"],
+    alsoUpdates: [SYNC_MANIFEST_FILE],
   };
 }
 
@@ -203,32 +200,45 @@ export function runApply(configDir: string, homeDir: string): ApplyResult {
     );
   }
 
-  let staged: StageFileContent;
+  let stagedRaw: unknown;
   try {
-    staged = JSON.parse(readFileSync(stagePath, "utf8")) as StageFileContent;
+    stagedRaw = JSON.parse(readFileSync(stagePath, "utf8"));
   } catch {
     throw new InternalCommandError(
       "invalid-stage",
       `${STAGE_FILE} is not valid JSON. Re-run stage.`,
     );
   }
-  if (staged?.version !== 1 || typeof staged.proposal?.core !== "string") {
+  const stagedParse = StageFileSchema.safeParse(stagedRaw);
+  if (!stagedParse.success) {
     throw new InternalCommandError(
       "invalid-stage",
       `${STAGE_FILE} has an unsupported format. Re-run stage.`,
     );
   }
+  const staged: StageFileContent = stagedParse.data;
 
   const current = gatherDrift(configDir, homeDir);
   assertInputsFresh(staged.inputs, current.inputs);
 
   mkdirSync(join(configDir, CANONICAL_DIR, "overlays"), { recursive: true });
-  writeFileSync(canonicalCorePath(configDir), staged.proposal.core, "utf8");
+  const corePath = canonicalCorePath(configDir);
+  const existingCore = existsSync(corePath)
+    ? readFileSync(corePath, "utf8")
+    : null;
+  if (existingCore !== staged.proposal.core) {
+    writeFileSync(corePath, staged.proposal.core, "utf8");
+  }
   for (const harness of CANONICAL_HARNESSES) {
     const overlayPath = canonicalOverlayPath(configDir, harness);
     const overlay = staged.proposal.overlays[harness];
     if (overlay !== undefined && overlay.trim() !== "") {
-      writeFileSync(overlayPath, overlay, "utf8");
+      const existingOverlay = existsSync(overlayPath)
+        ? readFileSync(overlayPath, "utf8")
+        : null;
+      if (existingOverlay !== overlay) {
+        writeFileSync(overlayPath, overlay, "utf8");
+      }
     } else if (existsSync(overlayPath)) {
       rmSync(overlayPath);
     }

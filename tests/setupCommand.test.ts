@@ -202,7 +202,22 @@ describe("runSetup", () => {
     });
   });
 
-  it("reconfigures an already-cloned machine by updating the remote", async () => {
+  it("refuses to reconfigure a configured machine without force", async () => {
+    const deps = makeDeps();
+    writeFileSync(deps.configFile, JSON.stringify({ remote: "gh" }), "utf8");
+    mkdirSync(join(deps.configDir, ".git"), { recursive: true });
+
+    await expectSetupError(
+      runSetup(
+        deps,
+        { remote: "git", repoUrl: "git@example.com:me/new.git" },
+        fakeSetupDeps(deps),
+      ),
+      "already-configured",
+    );
+  });
+
+  it("reconfigures an already-cloned machine when forced", async () => {
     const deps = makeDeps();
     writeFileSync(deps.configFile, JSON.stringify({ remote: "gh" }), "utf8");
     mkdirSync(join(deps.configDir, ".git"), { recursive: true });
@@ -210,7 +225,7 @@ describe("runSetup", () => {
 
     const result = await runSetup(
       deps,
-      { remote: "git", repoUrl: "git@example.com:me/new.git" },
+      { remote: "git", repoUrl: "git@example.com:me/new.git", force: true },
       fakeSetupDeps(deps, {
         gitSetRemoteUrl: async (_dir, url) => {
           remoteUpdates.push(url);

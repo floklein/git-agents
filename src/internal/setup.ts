@@ -20,15 +20,19 @@ import {
   gitSetRemoteUrl,
 } from "../utils/shell";
 import { readConfig, writeConfig } from "../utils/config";
-import { InternalCommandError } from "./errors";
+import { InternalCommandError, invalidInputError } from "./errors";
 import type { Config } from "../types";
 import type { InternalDeps } from "./commands";
 
 export const GH_REPO_NAME = "git-agents-remote";
 
 const SetupInputSchema = z.discriminatedUnion("remote", [
-  z.object({ remote: z.literal("gh") }),
-  z.object({ remote: z.literal("git"), repoUrl: z.string().min(1) }),
+  z.object({ remote: z.literal("gh"), force: z.boolean().optional() }),
+  z.object({
+    remote: z.literal("git"),
+    repoUrl: z.string().min(1),
+    force: z.boolean().optional(),
+  }),
 ]);
 
 export type SetupFlowDeps = Pick<
@@ -87,15 +91,15 @@ export async function runSetup(
   }
 
   const parsed = SetupInputSchema.safeParse(rawInput);
-  if (!parsed.success) {
+  if (!parsed.success) throw invalidInputError("setup", parsed.error);
+  const input = parsed.data;
+
+  if (existing && clonePresent && !input.force) {
     throw new InternalCommandError(
-      "invalid-input",
-      `setup input does not match the expected shape: ${parsed.error.issues
-        .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
-        .join("; ")}`,
+      "already-configured",
+      `This machine is already configured (remote: ${existing.remote}). Pass force:true to reconfigure the remote.`,
     );
   }
-  const input = parsed.data;
 
   let url: string;
   let createdRepo = false;

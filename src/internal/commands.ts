@@ -1,17 +1,11 @@
-import { existsSync, readFileSync } from "fs";
+import { existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { AGENT_DEFS } from "../utils/agentDefs";
 import { snapshotSyncPath } from "../utils/agents";
 import { CONFIG_DIR, CONFIG_FILE, getLocalSyncPath, readConfig } from "../utils/config";
 import { readSyncManifest, type SyncManifest } from "../utils/manifest";
-import {
-  GENERATED_TARGETS,
-  hashContent,
-  propagateCanonical,
-  readCanonical,
-  type GeneratedTarget,
-} from "../canonical/canonical";
+import { propagateCanonical, type GeneratedTarget } from "../canonical/canonical";
 import { driftStateOf, gatherDrift, type DriftState } from "../canonical/gather";
 import { runApply, runStage } from "../canonical/stage";
 import { runSyncCommand, type SyncFlowDeps } from "./sync";
@@ -104,9 +98,6 @@ function runStatus(deps: InternalDeps): StatusReport {
   const config = readConfig(deps.configFile);
   const clonePresent = existsSync(join(deps.configDir, ".git"));
 
-  const canonical = readCanonical(deps.configDir);
-  const canonicalVersion = canonical?.version ?? null;
-
   let manifest: SyncManifest | null = null;
   let manifestError: string | undefined;
   try {
@@ -115,23 +106,23 @@ function runStatus(deps: InternalDeps): StatusReport {
     manifestError = error?.message ?? String(error);
   }
 
-  const generated = GENERATED_TARGETS.map((target): GeneratedFileReport => {
-    const path = getLocalSyncPath(target.syncPath, deps.homeDir);
-    const present = existsSync(path);
-    const fileHash = present ? hashContent(readFileSync(path, "utf8")) : null;
-    return {
-      harness: target.harness,
-      syncPath: target.syncPath,
-      path,
-      present,
-      state: generatedFileState(
-        canonicalVersion,
-        present,
-        fileHash,
-        manifest?.generated?.[target.harness],
-      ),
-    };
-  });
+  // One gather pass feeds both the generated states and the drift summary,
+  // so a single status report cannot disagree with itself.
+  const gathered = gatherDrift(deps.configDir, deps.homeDir);
+  const canonicalVersion = gathered.canonicalVersion;
+
+  const generated = gathered.files.map((file): GeneratedFileReport => ({
+    harness: file.harness,
+    syncPath: file.syncPath,
+    path: file.path,
+    present: file.present,
+    state: generatedFileState(
+      canonicalVersion,
+      file.present,
+      gathered.inputs.fileHashes[file.harness] ?? null,
+      manifest?.generated?.[file.harness],
+    ),
+  }));
 
   const harnesses = AGENT_DEFS.map((def): HarnessReport => ({
     id: def.id,
@@ -152,13 +143,6 @@ function runStatus(deps: InternalDeps): StatusReport {
     }),
   }));
 
-  const driftFiles = Object.fromEntries(
-    gatherDrift(deps.configDir, deps.homeDir).files.map((file) => [
-      file.harness,
-      driftStateOf(file),
-    ]),
-  );
-
   return {
     configured: config !== null,
     config,
@@ -167,7 +151,12 @@ function runStatus(deps: InternalDeps): StatusReport {
     generated,
     ...(manifestError !== undefined ? { manifestError } : {}),
     harnesses,
-    drift: { available: true, files: driftFiles },
+    drift: {
+      available: true,
+      files: Object.fromEntries(
+        gathered.files.map((file) => [file.harness, driftStateOf(file)]),
+      ),
+    },
     caveats: detectCaveats(deps),
   };
 }

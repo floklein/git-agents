@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import {
@@ -155,6 +155,43 @@ describe("gatherDrift", () => {
     expect(core).toMatchObject({ changed: true, content: "# Core edited\n" });
     expect(overlay).toMatchObject({ changed: true, content: "# Extra edited\n" });
     expect(outside).toMatchObject({ content: "# appended memory\n" });
+    expect(driftStateOf(claude)).toBe("unattributed");
+  });
+
+  it("tolerates CRLF line endings without mangling attribution", () => {
+    const { configDir, homeDir } = makeDirs();
+    seedCanonical(configDir, "# Core\n");
+    propagateCanonical(configDir, homeDir);
+    const claudeMd = join(homeDir, ".claude", "CLAUDE.md");
+    const crlf = readFileSync(claudeMd, "utf8").replace(/\n/g, "\r\n");
+    writeFileSync(claudeMd, crlf, "utf8");
+
+    const claude = gatherDrift(configDir, homeDir).files.find(
+      (f) => f.harness === "claude",
+    )!;
+
+    expect(claude.markers).toBe("parsed");
+    expect(driftStateOf(claude)).toBe("none");
+  });
+
+  it("degrades an overlay claiming the wrong harness to unattributed", () => {
+    const { configDir, homeDir } = makeDirs();
+    seedCanonical(configDir, "# Core\n", { claude: "# Extra\n" });
+    propagateCanonical(configDir, homeDir);
+    const version = gatherDrift(configDir, homeDir).canonicalVersion!;
+    const claudeMd = join(homeDir, ".claude", "CLAUDE.md");
+    writeFileSync(
+      claudeMd,
+      `<!-- ga:begin core v=${version} -->\n# Core\n<!-- ga:end core -->\n` +
+        `<!-- ga:begin overlay harness=codex v=${version} -->\n# Wrong\n<!-- ga:end overlay -->\n`,
+      "utf8",
+    );
+
+    const claude = gatherDrift(configDir, homeDir).files.find(
+      (f) => f.harness === "claude",
+    )!;
+
+    expect(claude.markers).toBe("mangled");
     expect(driftStateOf(claude)).toBe("unattributed");
   });
 

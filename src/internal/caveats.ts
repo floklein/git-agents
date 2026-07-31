@@ -1,9 +1,10 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { getLocalSyncPath } from "../utils/config";
+import { GENERATED_TARGETS } from "../canonical/canonical";
+import { CODEX_CAP_BYTES, CODEX_NEAR_CAP_BYTES } from "../canonical/limits";
 import type { InternalDeps } from "./commands";
 
-const CODEX_CAP_BYTES = 32 * 1024;
-const CODEX_NEAR_CAP_BYTES = 28 * 1024;
 const GEMINI_DEFAULT_CONTEXT = "GEMINI.md";
 
 export type Caveat = {
@@ -60,7 +61,10 @@ export function detectCaveats(deps: InternalDeps): Caveat[] {
     });
   }
 
-  const codexAgents = join(deps.homeDir, ".codex", "AGENTS.md");
+  const codexTarget = GENERATED_TARGETS.find(
+    (target) => target.harness === "codex",
+  )!;
+  const codexAgents = getLocalSyncPath(codexTarget.syncPath, deps.homeDir);
   if (existsSync(codexAgents)) {
     const bytes = statSync(codexAgents).size;
     if (bytes >= CODEX_CAP_BYTES) {
