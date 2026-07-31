@@ -1,6 +1,6 @@
 {
   "name": "git-agents",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Agent skill to sync portable AI coding harness files and global instructions across machines and harnesses using git",
   "type": "module",
   "license": "MIT",

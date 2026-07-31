@@ -1,6 +1,6 @@
 ---
 name: git-agents
-description: Sync AI harness files and global instructions across machines and harnesses via git. Subcommands: setup, sync, sync unify, status.
+description: "Sync AI harness files and global instructions across machines and harnesses via git. Subcommands: setup, sync, sync unify, status."
 disable-model-invocation: true
 ---
 
