@@ -1,12 +1,12 @@
-# The sync workflow
+# The unify flow (sync unify)
 
-One unified flow. The first run is not special: it is simply the biggest drift (no canonical yet, every file fully unattributed).
+One unified convergence run: transport, then canonical merge, then regeneration, then a single push at the end. The first run is not special: it is simply the flow facing its biggest drift (no canonical yet, every file fully unattributed).
 
-Run the steps in order. Every write goes through the gate (exact diffs, explicit confirmation, No default).
+Every write goes through the gate (exact diffs, explicit confirmation, No default).
 
-## 1. Pull
+## 1. Transport, push deferred
 
-Run the pull subcommand as documented in SKILL.md (preview, gate, execute). This brings other machines' canonical and files into the clone before merging.
+Run the transport flow ([transport-flow.md](transport-flow.md)) with one change: call `transport-commit` with `{"deferPush":true}`. Other machines' files and canonical arrive; this machine's files are committed; nothing is pushed yet.
 
 ## 2. Gather
 
@@ -39,10 +39,10 @@ Run `stage` with `{"core":"...","overlays":{...},"inputs":<gather.inputs>}`.
 
 Confirm with the user against the staged diffs. On yes, run `apply`. On `stale-inputs`, go back to step 2. On success the canonical is written, all copies regenerate, and the stage clears.
 
-## 6. Push
+## 6. The single push
 
-Run the push subcommand (preview, gate, execute) so the new canonical and files reach the remote.
+Run `transport-begin` once more (it commits the regenerated copies and the canonical; with no remote activity in between it reports clean), then `transport-commit` without deferring. Everything from transport and convergence leaves in one push.
 
 ## 7. Report
 
-Close with the canonical version, which files converged, and any caveats still standing from `status`.
+Close with the canonical version, which files converged, how conflicts were settled, and any caveats still standing from `status`.

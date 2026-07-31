@@ -13,10 +13,14 @@ import {
 } from "../canonical/canonical";
 import { driftStateOf, gatherDrift, type DriftState } from "../canonical/gather";
 import { runApply, runStage } from "../canonical/stage";
-import { runSyncCommand, type SyncFlowDeps } from "./sync";
+import {
+  runTransportAbort,
+  runTransportBegin,
+  runTransportCommit,
+  runTransportResolve,
+} from "./transport";
 import { defaultSetupFlowDeps, runSetup, type SetupFlowDeps } from "./setup";
 import { detectCaveats, type Caveat } from "./caveats";
-import { gitAddCommitPush, gitPull } from "../utils/shell";
 import { InternalCommandError } from "./errors";
 import type { SyncPathSnapshot } from "../types";
 
@@ -24,7 +28,6 @@ export type InternalDeps = {
   homeDir: string;
   configDir: string;
   configFile: string;
-  sync?: SyncFlowDeps;
   setup?: SetupFlowDeps;
 };
 
@@ -36,10 +39,6 @@ export function defaultInternalDeps(): InternalDeps {
   const configFile =
     configDir === CONFIG_DIR ? CONFIG_FILE : join(configDir, "config.json");
   return { homeDir, configDir, configFile };
-}
-
-function syncFlowDeps(deps: InternalDeps): SyncFlowDeps {
-  return deps.sync ?? { gitPull, gitAddCommitPush };
 }
 
 export type InternalError = { code: string; message: string };
@@ -180,8 +179,10 @@ const COMMANDS: Record<
   gather: (deps) => gatherDrift(deps.configDir, deps.homeDir),
   stage: (deps, input) => runStage(deps.configDir, deps.homeDir, input),
   apply: (deps) => runApply(deps.configDir, deps.homeDir),
-  pull: (deps, input) => runSyncCommand("pull", deps, input, syncFlowDeps(deps)),
-  push: (deps, input) => runSyncCommand("push", deps, input, syncFlowDeps(deps)),
+  "transport-begin": (deps) => runTransportBegin(deps),
+  "transport-resolve": (deps, input) => runTransportResolve(deps, input),
+  "transport-commit": (deps, input) => runTransportCommit(deps, input),
+  "transport-abort": (deps) => runTransportAbort(deps),
   setup: (deps, input) =>
     runSetup(deps, input, deps.setup ?? defaultSetupFlowDeps(deps)),
   "install-pointer-docs": (deps) => ({

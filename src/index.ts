@@ -3,7 +3,8 @@ import { runInternalCli } from "./internal/cli";
 import pkg from "../package.json" with { type: "json" };
 
 const SKILL_SOURCE = "floklein/git-agents";
-const SKILL_SUBCOMMANDS = ["setup", "sync", "pull", "push", "status"];
+const SKILL_SUBCOMMANDS = ["setup", "sync", "status"];
+const MERGED_SUBCOMMANDS = ["pull", "push"];
 
 const USAGE = `git-agents ${pkg.version}
 
@@ -13,7 +14,7 @@ Usage:
   git-agents --version      print the version
 
 Everything else happens inside your coding agent:
-  /git-agents setup | sync | pull | push | status
+  /git-agents setup | sync | sync unify | status
 `;
 
 function bootstrap(): void {
@@ -47,6 +48,11 @@ if (first === "--internal") {
 } else if (SKILL_SUBCOMMANDS.includes(first)) {
   console.log(
     `The ${first} command lives in the skill now: run /git-agents ${first} inside your coding agent.\n` +
+      "If the skill is not installed yet, run: npx git-agents",
+  );
+} else if (MERGED_SUBCOMMANDS.includes(first)) {
+  console.log(
+    `The ${first} command merged into sync: run /git-agents sync inside your coding agent.\n` +
       "If the skill is not installed yet, run: npx git-agents",
   );
 } else {

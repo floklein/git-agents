@@ -30,7 +30,7 @@ Deterministic scripts do every file operation and render exact diffs; the agent 
 3. Converge your instructions:
 
    ```
-   /git-agents sync
+   /git-agents sync unify
    ```
 
 If you skip step 2, any other subcommand routes you into setup first.
@@ -40,9 +40,8 @@ If you skip step 2, any other subcommand routes you into setup first.
 | Subcommand | What it does |
 |---|---|
 | `/git-agents setup` | One-time onboarding: remote choice, repo creation, clone. Safe to re-run. |
-| `/git-agents sync` | The full convergence flow: pull, merge drift into the canonical, regenerate every harness file, push. |
-| `/git-agents pull` | Bring the remote's files to this machine. |
-| `/git-agents push` | Send this machine's files to the remote. |
+| `/git-agents sync` | Transport: your configs travel to and from the repo independently, git-native. Conflicts are resolved by the agent (reconciled when compatible, interviewed when contradictory). The canonical is never involved. |
+| `/git-agents sync unify` | The full convergence flow: transport, then merge drift into the canonical, regenerate every harness file, and push once. |
 | `/git-agents status` | Config, canonical version, per-file state, drift, and caveats. Read-only. |
 
 Every write is gated: the scripts render exact per-file diffs, and nothing happens until you explicitly confirm. Per harness: Claude Code and Cursor use `/git-agents <subcommand>`, Codex uses `$git-agents <subcommand>`, OpenCode invokes it through its skill tool, and Gemini CLI shows a consent prompt on skill activation, which is expected.
@@ -96,7 +95,7 @@ Version 1.0.0 removed the interactive TUI and the `ga pull` / `ga push` terminal
 
 - Your remote, clone, and synced files are untouched; the same `~/.git-agents` config keeps working.
 - Run `npx git-agents@latest` once to install the skill; setup detects the existing config and leaves it alone.
-- `ga pull` and `ga push` become `/git-agents pull` and `/git-agents push` inside your harness, with the same review-then-confirm behavior the TUI had.
+- `ga pull` and `ga push` merged into `/git-agents sync`, which now moves changes in both directions in one run and resolves conflicts instead of overwriting one side.
 - Paths committed by older releases remain in the remote checkout for safe manual cleanup. Current sync ignores them and does not copy, stage, or commit them.
 
 ## Requirements
