@@ -15,6 +15,7 @@ import {
   runTransportCommit,
   runTransportResolve,
 } from "../src/internal/transport";
+import { propagateCanonical } from "../src/canonical/canonical";
 import { InternalCommandError } from "../src/internal/errors";
 import type { InternalDeps } from "../src/internal/commands";
 
@@ -331,6 +332,122 @@ describe("transport", () => {
 
     const merged = readFileSync(join(b.homeDir, ".claude", "CLAUDE.md"));
     expect(Buffer.compare(merged, remoteBytes)).toBe(0);
+  }, 60000);
+
+  it("propagates deletions instead of resurrecting them", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeHome(a, ".claude/CLAUDE.md", "shared line\ncommon\n");
+    writeHome(a, ".gemini/GEMINI.md", "gemini rules\n");
+    await fullSync(a);
+
+    const b = makeMachine(bare);
+    await fullSync(b);
+    expect(existsSync(join(b.homeDir, ".gemini", "GEMINI.md"))).toBe(true);
+
+    rmSync(join(a.homeDir, ".gemini", "GEMINI.md"));
+    const begin = await runTransportBegin(a);
+    expect(begin.state).toBe("clean");
+    if (begin.state === "clean") {
+      expect(begin.outgoing).toEqual([
+        { path: ".gemini/GEMINI.md", status: "removed" },
+      ]);
+    }
+    await runTransportCommit(a, undefined);
+    expect(existsSync(join(a.homeDir, ".gemini", "GEMINI.md"))).toBe(false);
+
+    await fullSync(b);
+    expect(existsSync(join(b.homeDir, ".gemini", "GEMINI.md"))).toBe(false);
+    expect(readHome(b, ".claude/CLAUDE.md")).toBe("shared line\ncommon\n");
+  }, 60000);
+
+  it("keeps bare sync canonical-free while still carrying regenerated copies", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeHome(a, ".claude/CLAUDE.md", "old rules\n");
+
+    const begin = await runTransportBegin(a);
+    expect(begin.state).toBe("clean");
+    await runTransportCommit(a, { deferPush: true });
+
+    mkdirSync(join(a.configDir, "canonical"), { recursive: true });
+    writeFileSync(
+      join(a.configDir, "canonical", "core.md"),
+      "# Unified rules\n",
+      "utf8",
+    );
+    propagateCanonical(a.configDir, a.homeDir);
+
+    const finalBegin = await runTransportBegin(a);
+    expect(finalBegin.state).toBe("clean");
+    const finalCommit = await runTransportCommit(a, undefined);
+    expect(finalCommit.pushed).toBe(true);
+
+    const b = makeMachine(bare);
+    await fullSync(b);
+    expect(readHome(b, ".claude/CLAUDE.md")).toContain("ga:begin core");
+    expect(readHome(b, ".claude/CLAUDE.md")).toContain("# Unified rules");
+    expect(
+      readFileSync(join(b.configDir, "canonical", "core.md"), "utf8"),
+    ).toBe("# Unified rules\n");
+    expect(existsSync(join(b.homeDir, "canonical"))).toBe(false);
+  }, 60000);
+
+  it("excludes this machine's own outgoing files from the conflict incoming list", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeHome(a, ".claude/CLAUDE.md", "shared line\ncommon\n");
+    await fullSync(a);
+
+    const b = makeMachine(bare);
+    writeHome(a, ".claude/CLAUDE.md", "A line\ncommon\n");
+    writeHome(a, ".codex/AGENTS.md", "codex rules\n");
+    await fullSync(a);
+    writeHome(b, ".claude/CLAUDE.md", "B line\ncommon\n");
+    writeHome(b, ".gemini/GEMINI.md", "gemini rules\n");
+
+    const begin = await runTransportBegin(b);
+    expect(begin.state).toBe("conflicts");
+    if (begin.state !== "conflicts") return;
+    expect(begin.incoming).toContain(".claude/CLAUDE.md");
+    expect(begin.incoming).toContain(".codex/AGENTS.md");
+    expect(begin.incoming).not.toContain(".gemini/GEMINI.md");
+
+    await runTransportAbort(b);
+  }, 60000);
+
+  it("keeps the original pre-sync point across a rejected-push retry", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeHome(a, ".claude/CLAUDE.md", "shared line\ncommon\n");
+    await fullSync(a);
+
+    const b = makeMachine(bare);
+    await fullSync(b);
+    const originalHead = execFileSync(
+      "git",
+      ["-C", b.configDir, "rev-parse", "HEAD"],
+      { encoding: "utf8" },
+    ).trim();
+
+    writeHome(b, ".gemini/GEMINI.md", "gemini rules\n");
+    const begin = await runTransportBegin(b);
+    expect(begin.state).toBe("clean");
+
+    writeHome(a, ".codex/AGENTS.md", "codex rules\n");
+    await fullSync(a);
+    await expectCode(runTransportCommit(b, undefined), "push-rejected");
+
+    const retry = await runTransportBegin(b);
+    expect(retry.state).toBe("clean");
+    const abort = await runTransportAbort(b);
+    expect(abort.aborted).toBe(true);
+    const restoredHead = execFileSync(
+      "git",
+      ["-C", b.configDir, "rev-parse", "HEAD"],
+      { encoding: "utf8" },
+    ).trim();
+    expect(restoredHead).toBe(originalHead);
   }, 60000);
 
   it("reports push rejection when origin advanced mid-transport", async () => {

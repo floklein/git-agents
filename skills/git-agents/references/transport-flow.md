@@ -4,7 +4,7 @@ The sync state is just git: the clone's history is the per-machine base, and a c
 
 ## 1. Begin
 
-Run `transport-begin`. It records the pre-sync point, mirrors local harness files into the clone, commits them, and merges from origin. Two outcomes:
+Run `transport-begin`. It records the pre-sync point (kept across retries, so abort always reaches the state the user last confirmed), mirrors local harness files into the clone, commits them, and merges from origin. Two outcomes:
 
 - `state: "clean"`: `outgoing` lists what this machine contributes, `incoming` what the merge brought. Go to step 3.
 - `state: "conflicts"`: `incoming` lists every path the merge touches, and each conflict entry carries `path`, `binary`, and the `base`, `local`, and `remote` contents. Go to step 2.
@@ -23,7 +23,7 @@ Submit text resolutions with `transport-resolve` (`{"files":[{"path":"...","cont
 
 ## 3. Gate, then commit
 
-Show the user what will change: the incoming and outgoing paths, and for every conflicted file a diff of the resolution against both sides. **No is the default**; declining means `transport-abort`, which restores the recorded pre-sync state even when the merge completed cleanly on its own. On yes, run `transport-commit`. It completes the merge, mirrors the merged result back into the home directory, and pushes. On `push-failed`, re-running `transport-commit` retries the push safely; on `push-rejected`, origin advanced mid-transport: run `transport-begin` again to merge the new changes first.
+Show the user what will change: the incoming and outgoing paths, and for every conflicted file a diff of the resolution against both sides. **No is the default**; declining means `transport-abort`, which restores the recorded pre-sync state even when the merge completed cleanly on its own. On yes, run `transport-commit`. It completes the merge, pushes, then mirrors the merged result back into the home directory, so a failed push never touches local files. On `push-failed`, re-running `transport-commit` retries the push safely; on `push-rejected`, origin advanced mid-transport: run `transport-begin` again to merge the new changes first.
 
 ## 4. Report
 

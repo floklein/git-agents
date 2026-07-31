@@ -49,9 +49,9 @@ Hidden subcommands of the npm binary, JSON in/out, no interactive prompts. Not d
 | Command | Effect |
 | --- | --- |
 | `status` | Report config presence, harness file paths and hashes, canonical version, drift summary, caveats |
-| `transport-begin` | Record the pre-sync point, mirror local harness files into the clone, commit them (scoped), fetch and attempt the merge from origin; report either the clean incoming/outgoing changes or the merge's touched paths plus the conflicted files with base, local, and remote contents |
+| `transport-begin` | Record the pre-sync point (kept across retries), mirror local harness files into the clone, commit them (scoped), fetch and attempt the merge from origin; report either the clean incoming/outgoing changes or the remote side's touched paths plus the conflicted files with base, local, and remote contents |
 | `transport-resolve` | Accept per-file resolutions: full contents for text, or a local/remote side pick (binary conflicts) |
-| `transport-commit` | Complete the merge commit, mirror the merged result back to the home directory, and push; refuses without a transport in progress or while conflicts remain unresolved; distinguishes retryable push failures from origin-advanced rejection. Takes a defer-push option used by `sync unify` |
+| `transport-commit` | Complete the merge commit, push, then mirror the merged result back to the home directory (a rejected push leaves home untouched); refuses without a transport in progress or while conflicts remain unresolved; distinguishes retryable push failures from origin-advanced rejection. Takes a defer-push option used by `sync unify` |
 | `transport-abort` | Abort the in-progress merge and restore the recorded pre-sync state, including after a clean auto-merge |
 | `gather` | Collect the harness files and canonical into a merge workspace; emit structured diffs vs canonical |
 | `stage` | Accept a proposed canonical (core + overlays) from the agent; render exact per-file diffs of what apply would write |
@@ -59,7 +59,7 @@ Hidden subcommands of the npm binary, JSON in/out, no interactive prompts. Not d
 | `propagate` | Regenerate harness copies from the current canonical |
 | `install-pointer-docs` | Print the Cursor pointer-rule text for the user to paste (see Cursor) |
 
-All commands are idempotent and safe to re-run where the underlying git state allows; `transport-commit` and `apply` are the only ones that write outside the workspace and the clone. The former one-directional `pull` and `push` commands are superseded by the transport primitives ([#26](https://github.com/floklein/git-agents/issues/26)).
+All commands are idempotent and safe to re-run where the underlying git state allows; `transport-commit`, `apply`, and `propagate` are the only ones that write outside the workspace and the clone. The former one-directional `pull` and `push` commands are superseded by the transport primitives ([#26](https://github.com/floklein/git-agents/issues/26)).
 
 ## Canonical model ([#8](https://github.com/floklein/git-agents/issues/8))
 
@@ -126,11 +126,13 @@ Cursor has no global instructions file (verified; open feature request). Cursor 
 **The sync state is just git.** Configs are treated independently, per path, and copied to and from the repo; the clone's history is the per-machine sync state, so there is no custom base tracking. In order, each write gated:
 
 1. **Begin.** `transport-begin` mirrors local harness files into the clone, commits them under the existing scoped-commit safety rules, then fetches and attempts the merge from origin. Git detects conflicts per file against the real merge base.
-2. **Clean path.** No conflicts: the gate shows what will change on both sides; on Yes, `transport-commit` mirrors the merged result home and pushes.
+2. **Clean path.** No conflicts: the gate shows what will change on both sides; on Yes, `transport-commit` pushes, then mirrors the merged result home.
 3. **Conflict path.** For each conflicted file: git already merged non-overlapping edits silently. The agent **reconciles compatible overlapping edits itself** (keep both additions, honor both changes) and **interviews the user only when the sides contradict**; binary or opaque both-modified files are always a pick-a-side interview. Resolutions land via `transport-resolve`.
-4. **Gate, then commit.** Every resolution, automatic or interviewed, shows as a diff before `transport-commit` completes the merge, mirrors home, and pushes. **No is the default**; declining runs `transport-abort`.
+4. **Gate, then commit.** Every resolution, automatic or interviewed, shows as a diff before `transport-commit` completes the merge, pushes, and mirrors home. **No is the default**; declining runs `transport-abort`.
 
-Instruction files carrying ga markers are **plain text** here; if a resolution mangles markers, drift detection later reports the file as unattributed and `sync unify` recovers it. Deletion semantics keep riding the manifest's initialized-paths guard.
+Instruction files carrying ga markers are **plain text** here; if a resolution mangles markers, drift detection later reports the file as unattributed and `sync unify` recovers it.
+
+**Deletions** need one per-machine complement to git: the home directory is not git-tracked, so the clone's history cannot say whether this machine ever held a path. `transport-commit` records which sync paths the home directory holds after each completed sync (an untracked machine-local file beside the config); a missing path counts as a deletion, in either direction, only when that record says this machine had it. A fresh machine therefore never reads as a mass deletion, and real deletions propagate instead of resurrecting.
 
 ## The unify workflow: `sync unify` ([#9](https://github.com/floklein/git-agents/issues/9), [#10](https://github.com/floklein/git-agents/issues/10), [#28](https://github.com/floklein/git-agents/issues/28))
 

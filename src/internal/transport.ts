@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { z } from "zod";
 import { AGENT_DEFS } from "../utils/agentDefs";
 import { CANONICAL_DIR } from "../canonical/canonical";
-import { SYNC_MANIFEST_FILE, readSyncManifest } from "../utils/manifest";
+import { SYNC_MANIFEST_FILE } from "../utils/manifest";
 import { getLocalSyncPath, getRemoteSyncPath } from "../utils/config";
 import {
   compareSyncPathSnapshots,
@@ -27,6 +27,12 @@ const ALL_SYNC_PATHS = AGENT_DEFS.flatMap((def) => def.syncPaths);
 const COMMIT_SCOPE = [...ALL_SYNC_PATHS, SYNC_MANIFEST_FILE, CANONICAL_DIR];
 
 const TRANSPORT_STATE_FILE = ".git-agents-transport.json";
+// What the home directory held after this machine's last completed sync.
+// Deletion detection needs exactly this per-machine memory: the home dir
+// is not git-tracked, so the clone's history cannot answer "did this
+// machine ever have that file", and without it a fresh machine's empty
+// home would read as a mass deletion.
+const LAST_SYNC_FILE = ".git-agents-last-sync.json";
 const MAX_CAPTURE_BYTES = 10 * 1024 * 1024;
 const NUL = String.fromCharCode(0);
 
@@ -82,7 +88,10 @@ function git(dir: string, ...args: string[]): Promise<GitResult> {
       resolve({
         ok: exitCode === 0,
         output,
-        error: exitCode === 0 ? undefined : errText || `git exited with code ${exitCode}`,
+        error:
+          exitCode === 0
+            ? undefined
+            : errText || `git exited with code ${exitCode ?? "unknown (terminated)"}`,
         exitCode: exitCode ?? undefined,
         oversized: oversized || undefined,
       });
@@ -128,7 +137,33 @@ function clearTransportState(configDir: string): void {
   rmSync(statePath(configDir), { force: true });
 }
 
-async function conflictedPaths(configDir: string): Promise<string[]> {
+function readLastSyncedPaths(configDir: string): Set<string> {
+  const path = join(configDir, LAST_SYNC_FILE);
+  if (!existsSync(path)) return new Set();
+  try {
+    const state = JSON.parse(readFileSync(path, "utf8"));
+    if (state?.version !== 1 || !Array.isArray(state.paths)) return new Set();
+    return new Set(state.paths.filter((p: unknown) => typeof p === "string"));
+  } catch {
+    return new Set();
+  }
+}
+
+function writeLastSyncedPaths(deps: InternalDeps): void {
+  const paths = ALL_SYNC_PATHS.filter(
+    (syncPath) =>
+      snapshotSyncPath(getLocalSyncPath(syncPath, deps.homeDir)) !== null,
+  );
+  writeFileSync(
+    join(deps.configDir, LAST_SYNC_FILE),
+    `${JSON.stringify({ version: 1, paths }, null, 2)}\n`,
+    "utf8",
+  );
+}
+
+async function conflictedEntries(
+  configDir: string,
+): Promise<Map<string, Set<number>>> {
   const result = await git(configDir, "ls-files", "-u", "-z");
   if (!result.ok) {
     throw new InternalCommandError(
@@ -136,12 +171,21 @@ async function conflictedPaths(configDir: string): Promise<string[]> {
       `Could not list conflicted files: ${result.error ?? "unknown error"}`,
     );
   }
-  const paths = new Set<string>();
+  const entries = new Map<string, Set<number>>();
   for (const entry of result.output.split(NUL)) {
-    const path = entry.split("\t")[1];
-    if (path) paths.add(path);
+    const tab = entry.indexOf("\t");
+    if (tab === -1) continue;
+    const path = entry.slice(tab + 1);
+    const stage = Number(entry.slice(0, tab).split(" ")[2]);
+    if (!path || !stage) continue;
+    if (!entries.has(path)) entries.set(path, new Set());
+    entries.get(path)!.add(stage);
   }
-  return [...paths].sort();
+  return entries;
+}
+
+async function conflictedPaths(configDir: string): Promise<string[]> {
+  return [...(await conflictedEntries(configDir)).keys()].sort();
 }
 
 type StageRead = { content: string | null; opaque: boolean };
@@ -150,9 +194,16 @@ async function stageContent(
   configDir: string,
   stage: 1 | 2 | 3,
   path: string,
+  presentStages: Set<number>,
 ): Promise<StageRead> {
+  if (!presentStages.has(stage)) return { content: null, opaque: false };
   const result = await git(configDir, "show", `:${stage}:${path}`);
-  if (!result.ok) return { content: null, opaque: false };
+  if (!result.ok) {
+    throw new InternalCommandError(
+      "transport-failed",
+      `Could not read stage ${stage} of ${path}: ${result.error ?? "unknown error"}`,
+    );
+  }
   if (result.oversized || result.output.includes(NUL)) {
     return { content: null, opaque: true };
   }
@@ -173,15 +224,10 @@ function diffAgainstClone(
   deps: InternalDeps,
   direction: "outgoing" | "incoming",
 ): PathChange[] {
-  let initialized: Set<string>;
-  try {
-    initialized = new Set(readSyncManifest(deps.configDir)?.paths ?? []);
-  } catch (error: any) {
-    throw new InternalCommandError(
-      "transport-failed",
-      `Could not read the sync manifest: ${error?.message ?? String(error)}`,
-    );
-  }
+  // A missing source counts as a deletion only when this machine's home
+  // actually held the path after its last sync; otherwise the other side
+  // simply has content this machine never had.
+  const lastSynced = readLastSyncedPaths(deps.configDir);
   const changes: PathChange[] = [];
   for (const syncPath of ALL_SYNC_PATHS) {
     const localPath = getLocalSyncPath(syncPath, deps.homeDir);
@@ -192,7 +238,7 @@ function diffAgainstClone(
     const destination = direction === "outgoing" ? remote : local;
     if (
       source === null &&
-      !(destination !== null && initialized.has(syncPath))
+      !(destination !== null && lastSynced.has(syncPath))
     ) {
       continue;
     }
@@ -234,14 +280,15 @@ async function stageScope(configDir: string): Promise<void> {
   }
 }
 
+// Three-dot: only what the remote side changed since the merge base, so
+// this machine's own outgoing commits never masquerade as incoming.
 async function mergedPaths(configDir: string): Promise<string[]> {
   const result = await git(
     configDir,
     "diff",
     "--name-only",
     "-z",
-    "HEAD",
-    "MERGE_HEAD",
+    "HEAD...MERGE_HEAD",
   );
   if (!result.ok) return [];
   return result.output.split(NUL).filter(Boolean).sort();
@@ -267,16 +314,26 @@ export async function runTransportBegin(
     );
   }
 
-  const head = await git(deps.configDir, "rev-parse", "--verify", "HEAD^{commit}");
-  const state: TransportState = {
-    version: 1,
-    preHead: head.ok ? head.output.trim() : null,
-  };
-  writeFileSync(
-    statePath(deps.configDir),
-    `${JSON.stringify(state, null, 2)}\n`,
-    "utf8",
-  );
+  // An existing marker means an earlier run never completed (push failure,
+  // crash, or decline path): keep its pre-sync point so abort can always
+  // reach the state the user last confirmed.
+  if (readTransportState(deps.configDir) === null) {
+    const head = await git(
+      deps.configDir,
+      "rev-parse",
+      "--verify",
+      "HEAD^{commit}",
+    );
+    const state: TransportState = {
+      version: 1,
+      preHead: head.ok ? head.output.trim() : null,
+    };
+    writeFileSync(
+      statePath(deps.configDir),
+      `${JSON.stringify(state, null, 2)}\n`,
+      "utf8",
+    );
+  }
 
   const outgoing = mirrorChanged(deps, "outgoing");
 
@@ -310,19 +367,19 @@ export async function runTransportBegin(
       error.includes("no such ref was fetched") ||
       error.includes("couldn't find remote ref");
     if (!emptyRemote) {
-      const conflicted = await conflictedPaths(deps.configDir);
-      if (conflicted.length === 0) {
+      const conflicted = await conflictedEntries(deps.configDir);
+      if (conflicted.size === 0) {
         throw new InternalCommandError(
           "transport-failed",
           `Could not merge from origin: ${error || "unknown error"}`,
         );
       }
       const conflicts: ConflictFile[] = [];
-      for (const path of conflicted) {
+      for (const [path, stages] of [...conflicted.entries()].sort()) {
         const [base, local, remote] = await Promise.all([
-          stageContent(deps.configDir, 1, path),
-          stageContent(deps.configDir, 2, path),
-          stageContent(deps.configDir, 3, path),
+          stageContent(deps.configDir, 1, path, stages),
+          stageContent(deps.configDir, 2, path, stages),
+          stageContent(deps.configDir, 3, path, stages),
         ]);
         const binary = base.opaque || local.opaque || remote.opaque;
         conflicts.push({
@@ -471,8 +528,8 @@ export async function runTransportCommit(
     mergeCompleted = true;
   }
 
-  const mirroredBack = mirrorChanged(deps, "incoming");
-
+  // Push before touching the home directory: a rejected push must leave
+  // local files exactly as they were.
   let pushed = false;
   if (!deferPush) {
     const pushResult = await git(deps.configDir, "push", "-u", "origin", "HEAD");
@@ -496,6 +553,9 @@ export async function runTransportCommit(
     pushed = true;
   }
 
+  const mirroredBack = mirrorChanged(deps, "incoming");
+
+  writeLastSyncedPaths(deps);
   clearTransportState(deps.configDir);
   return { mergeCompleted, mirroredBack, pushed };
 }
@@ -533,8 +593,16 @@ export async function runTransportAbort(
         );
       }
     } else {
+      // Unborn pre-sync state: drop the branch ref if one was created
+      // (tolerated when none exists) and unstage everything.
       await git(deps.configDir, "update-ref", "-d", "HEAD");
-      await git(deps.configDir, "reset");
+      const unstaged = await git(deps.configDir, "reset");
+      if (!unstaged.ok) {
+        throw new InternalCommandError(
+          "transport-failed",
+          `Could not restore the pre-sync state: ${unstaged.error ?? "unknown error"}`,
+        );
+      }
     }
     clearTransportState(deps.configDir);
   }

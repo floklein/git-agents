@@ -41,7 +41,7 @@ Confirm with the user against the staged diffs. On yes, run `apply`. On `stale-i
 
 ## 6. The single push
 
-Run `transport-begin` once more (it commits the regenerated copies and the canonical; with no remote activity in between it reports clean), then `transport-commit` without deferring. Everything from transport and convergence leaves in one push.
+Run `transport-begin` once more (it commits the regenerated copies and the canonical; with no remote activity in between it reports clean), then `transport-commit` without deferring. Everything from transport and convergence leaves in one push. If this begin reports conflicts instead (origin advanced while you were converging), run the transport conflict steps ([transport-flow.md](transport-flow.md)) before committing; if the merge brought canonical changes, re-run gather afterward to confirm nothing new drifted.
 
 ## 7. Report
 
