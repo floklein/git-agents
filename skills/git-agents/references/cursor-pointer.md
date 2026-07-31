@@ -2,7 +2,7 @@
 
 Cursor has no global instructions file (its User Rules live in the app's settings), so git-agents does not generate one. The opt-in bridge is a one-time manual User Rule that makes Cursor's agent read the canonical file at runtime.
 
-Run `npx -y git-agents --internal install-pointer-docs` to print the rule text with the exact resolved path, then walk the user through it:
+Run `npx -y git-agents@latest --internal install-pointer-docs` to print the rule text with the exact resolved path, then walk the user through it:
 
 1. Open Cursor Settings, then Rules, then User Rules.
 2. Add a new rule and paste the printed text.

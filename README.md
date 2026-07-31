@@ -19,6 +19,8 @@ Deterministic scripts do every file operation and render exact diffs; the agent 
    npx git-agents@latest
    ```
 
+   Installed once, updated in-session: whenever a newer git-agents release exists, any `/git-agents` command ends by offering the update; accept and the skill refreshes itself.
+
 2. Open your coding agent and run:
 
    ```

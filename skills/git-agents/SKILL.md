@@ -9,7 +9,7 @@ disable-model-invocation: true
 You orchestrate; deterministic scripts do every file operation. Run them with:
 
 ```
-npx -y git-agents --internal <command> [--input <json> | --input - | --input-file <path>]
+npx -y git-agents@latest --internal <command> [--input <json> | --input - | --input-file <path>]
 ```
 
 Every command prints exactly one JSON envelope: `{"ok":true,"result":...}` or `{"ok":false,"error":{"code":"...","message":"..."}}`. Relay error messages with their remedy; never edit synced files by hand; never write anything except through the gate below.
@@ -31,10 +31,15 @@ The command surface:
 | `apply` | Write the staged canonical and regenerate all copies | gated |
 | `propagate` | Regenerate harness copies from the current canonical | gated |
 | `install-pointer-docs` | Print the Cursor pointer rule with resolved paths | no |
+| `version-check` | Compare the installed skill version to the CLI version | no |
 
 ## Router
 
-The first word of the arguments selects the subcommand: `setup`, `sync`, or `status`. When it is `sync`, an optional second word `unify` selects the full convergence flow; any other second word gets a hint listing `sync` and `sync unify`. With no argument, or an unknown first word, run the status subcommand and list the surface. Before any subcommand, if `status` reports `clonePresent: false`, run the setup branch first, then offer to continue what was originally asked.
+The first word of the arguments selects the subcommand: `setup`, `sync`, or `status`. When it is `sync`, an optional second word `unify` selects the full convergence flow; any other second word gets a hint listing `sync` and `sync unify`. With no argument, or an unknown first word, run the status subcommand and list the surface. Before any subcommand, if `status` reports `clonePresent: false`, run the setup branch first, then offer to continue what was originally asked. After any subcommand completes, run the update check (see below).
+
+## Update check
+
+After the requested subcommand's work is fully done (never before or instead of it), check whether this skill is outdated: read the `VERSION` file next to this SKILL.md, then run `version-check` with `{"skillVersion":"<its contents>"}`. If the result says `updateAvailable: true`, append exactly one line to your closing report: "git-agents <cliVersion> is available (installed: <skillVersion>). Want me to update?" On an explicit yes, run `npx -y skills add floklein/git-agents -y` and confirm the refresh. On a decline, drop the subject; nothing is remembered. If the VERSION file is missing, the command fails, or `updateAvailable` is false, say nothing at all.
 
 ## The gate
 
