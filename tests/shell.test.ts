@@ -20,6 +20,13 @@ import {
   runCommand,
 } from "../src/utils/shell";
 
+// Keep temp-repo commits independent of the host's global git config:
+// a machine enforcing commit signing would otherwise hang these tests
+// waiting for a passphrase prompt.
+process.env.GIT_CONFIG_COUNT = "1";
+process.env.GIT_CONFIG_KEY_0 = "commit.gpgsign";
+process.env.GIT_CONFIG_VALUE_0 = "false";
+
 const tempDirs: string[] = [];
 
 function useTempDir(name: string): string {
