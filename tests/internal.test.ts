@@ -8,6 +8,7 @@ import {
   type StatusReport,
 } from "../src/internal/commands";
 import { parseInternalArgs, runInternalCli } from "../src/internal/cli";
+import type { VersionCheckResult } from "../src/internal/versionCheck";
 import { snapshotSyncPath } from "../src/utils/agents";
 
 let tmpDirs: string[] = [];
@@ -154,11 +155,7 @@ describe("version-check", () => {
     const outcome = await runInternalCommand("version-check", input, deps);
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) throw new Error("unreachable");
-    return outcome.result as {
-      skillVersion: string | null;
-      cliVersion: string;
-      updateAvailable: boolean;
-    };
+    return outcome.result as VersionCheckResult;
   }
 
   it("reports an update when the skill is older than the CLI", async () => {

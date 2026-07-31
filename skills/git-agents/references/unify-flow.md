@@ -37,7 +37,7 @@ Run `stage` with `{"core":"...","overlays":{...},"inputs":<gather.inputs>}`. Wri
 
 ## 5. Gate, then apply
 
-Confirm with the user against the staged diffs, plain text in the same message as the diffs (gate rule). On yes, run `apply`. On `stale-inputs`, go back to step 2. On success the canonical is written, all copies regenerate, and the stage clears.
+Confirm with the user against the staged diffs: one message carrying the step-4 diffs (re-render them if anything was shown separately) with the plain-text question directly below, never a question tool (gate rule). On yes, run `apply`. On `stale-inputs`, go back to step 2. On success the canonical is written, all copies regenerate, and the stage clears.
 
 ## 6. The single push
 
