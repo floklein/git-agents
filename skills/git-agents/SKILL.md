@@ -1,6 +1,6 @@
 ---
 name: git-agents
-description: "Sync AI harness files and global instructions across machines and harnesses via git. Subcommands: setup, sync, sync unify, status."
+description: "Sync AI harness files and global instructions across machines and harnesses via git. Subcommands: setup, sync, sync unify, edit, status."
 disable-model-invocation: true
 ---
 
@@ -35,7 +35,7 @@ The command surface:
 
 ## Router
 
-The first word of the arguments selects the subcommand: `setup`, `sync`, or `status`. When it is `sync`, an optional second word `unify` selects the full convergence flow; any other second word gets a hint listing `sync` and `sync unify`. With no argument, or an unknown first word, run the status subcommand and list the surface. Before any subcommand, if `status` reports `clonePresent: false`, run the setup branch first, then offer to continue what was originally asked. After any subcommand completes, run the update check (see below).
+The first word of the arguments selects the subcommand: `setup`, `sync`, `edit`, or `status`. When it is `sync`, an optional second word `unify` selects the full convergence flow; any other second word gets a hint listing `sync` and `sync unify`. When it is `edit`, everything after the first word is the freeform edit request. With no argument, or an unknown first word, run the status subcommand and list the surface. Before any subcommand, if `status` reports `clonePresent: false`, run the setup branch first, then offer to continue what was originally asked. After any subcommand completes, run the update check (see below).
 
 ## Update check
 
@@ -65,6 +65,19 @@ Transport only: configs travel to and from the repo independently; the canonical
 ### sync unify
 
 The full convergence flow: transport, then merge drift into the canonical, regenerate every copy, and push once. Follow [references/unify-flow.md](references/unify-flow.md).
+
+### edit
+
+A freeform request to change the global instructions: add a rule, reword one, remove one. The request text is never pasted verbatim; you interpret it and draft the change into the canonical yourself. With no request text, ask what the user wants changed; their answer is the request.
+
+Run the unify flow ([references/unify-flow.md](references/unify-flow.md)) with one addition to its draft step: besides classifying any drift, fold the requested change into the proposed core and overlays.
+
+- Route it by the same classification rules: content that helps every harness goes to the core; harness-specific content goes to that harness's overlay. A request naming a harness ("for Claude only") pins the overlay.
+- Place it in the section where it belongs, matching the canonical's tone, formatting, and heading conventions. Merge it into an existing rule rather than adding a near-duplicate.
+- Removals and rewordings edit the existing content in place.
+- Ask only when the request is genuinely ambiguous, such as an unclear target or a contradiction with an existing rule; otherwise decide, and let the gate diffs speak.
+
+Everything else is the unify flow unchanged: pre-existing drift is folded in alongside the request, and one stage, one gate, one apply, one push carry both.
 
 ## Cursor
 

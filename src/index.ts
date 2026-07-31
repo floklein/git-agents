@@ -3,7 +3,7 @@ import { runInternalCli } from "./internal/cli";
 import pkg from "../package.json" with { type: "json" };
 
 const SKILL_SOURCE = "floklein/git-agents";
-const SKILL_SUBCOMMANDS = ["setup", "sync", "status"];
+const SKILL_SUBCOMMANDS = ["setup", "sync", "edit", "status"];
 const MERGED_SUBCOMMANDS = ["pull", "push"];
 
 const USAGE = `git-agents ${pkg.version}
@@ -14,7 +14,7 @@ Usage:
   git-agents --version      print the version
 
 Everything else happens inside your coding agent:
-  /git-agents setup | sync | sync unify | status
+  /git-agents setup | sync | sync unify | edit | status
 `;
 
 function bootstrap(): void {

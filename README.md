@@ -44,6 +44,7 @@ If you skip step 2, any other subcommand routes you into setup first.
 | `/git-agents setup` | One-time onboarding: remote choice, repo creation, clone. Safe to re-run. |
 | `/git-agents sync` | Transport: your configs travel to and from the repo independently, git-native. Conflicts are resolved by the agent (reconciled when compatible, interviewed when contradictory). The canonical is never involved. |
 | `/git-agents sync unify` | The full convergence flow: transport, then merge drift into the canonical, regenerate every harness file, and push once. |
+| `/git-agents edit <request>` | Freeform edit of your global instructions: the agent interprets the request (add, reword, remove), drafts it into the canonical in the right section, and runs the full convergence flow around it. |
 | `/git-agents status` | Config, canonical version, per-file state, drift, and caveats. Read-only. |
 
 Every write is gated: the scripts render exact per-file diffs, and nothing happens until you explicitly confirm. Per harness: Claude Code and Cursor use `/git-agents <subcommand>`, Codex uses `$git-agents <subcommand>`, OpenCode invokes it through its skill tool, and Gemini CLI shows a consent prompt on skill activation, which is expected.
