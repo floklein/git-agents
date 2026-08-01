@@ -5,6 +5,7 @@ import {
 } from "node:child_process";
 import type { Readable } from "node:stream";
 import type { ShellResult } from "../types";
+import { errorMessage } from "./errors";
 
 const MAX_CAPTURED_OUTPUT_LENGTH = 64 * 1024;
 
@@ -87,7 +88,7 @@ export async function runCommand(
     } catch (error) {
       finish({
         ok: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
       return;
     }
@@ -207,6 +208,24 @@ export async function initRepo(
   signal?: AbortSignal,
 ): Promise<ShellResult> {
   return runCommand("git", ["-C", dir, "init"], signal);
+}
+
+// Commits reachable from any local branch or HEAD but from no
+// remote-tracking ref: what a re-clone would discard. Failures (unborn
+// HEAD, corrupt repo) count as zero; there is nothing recoverable to
+// protect in either case.
+export async function gitCountUnpushedCommits(
+  dir: string,
+  signal?: AbortSignal,
+): Promise<number> {
+  const result = await runCommand(
+    "git",
+    ["-C", dir, "rev-list", "--count", "HEAD", "--branches", "--not", "--remotes"],
+    signal,
+  );
+  if (!result.ok) return 0;
+  const count = Number.parseInt(result.output?.trim() ?? "", 10);
+  return Number.isNaN(count) ? 0 : count;
 }
 
 export async function gitSetRemoteUrl(

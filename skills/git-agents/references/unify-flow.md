@@ -2,7 +2,7 @@
 
 One unified convergence run: transport, then canonical merge, then regeneration, then a single push at the end. The first run is not special: it is simply the flow facing its biggest drift (no canonical yet, every file fully unattributed).
 
-Every write goes through the gate (exact diffs, explicit confirmation, No default).
+Every write goes through the gate rule (SKILL.md, "The gate").
 
 ## 1. Transport, push deferred
 
@@ -29,7 +29,7 @@ Ask the user **only** about genuinely ambiguous chunks: content you cannot confi
 
 ## 4. Stage
 
-Run `stage` with `{"core":"...","overlays":{...},"inputs":<gather.inputs>}`.
+Run `stage` with `{"core":"...","overlays":{...},"inputs":<gather.inputs>}`. Write that JSON to a temp file and pass it with `--input-file` (or pipe it via `--input -`): the payload carries multi-line content with backslashes and backticks, which inline `--input` can corrupt through shell quoting, especially on Windows.
 
 - Show every non-empty `diff` from the result verbatim (they cover canonical core, overlays including deletions, and all four generated files).
 - Surface every warning: `near-cap` or `over-cap` means the Codex file approaches or exceeds its 32 KiB silent-truncation cap; propose trimming before applying.
@@ -37,7 +37,7 @@ Run `stage` with `{"core":"...","overlays":{...},"inputs":<gather.inputs>}`.
 
 ## 5. Gate, then apply
 
-Confirm with the user against the staged diffs. On yes, run `apply`. On `stale-inputs`, go back to step 2. On success the canonical is written, all copies regenerate, and the stage clears.
+Confirm with the user against the staged diffs per the gate rule, re-rendering the step-4 diffs in the confirmation message if anything was shown separately. On yes, run `apply`. On `stale-inputs`, go back to step 2. On success the canonical is written, all copies regenerate, and the stage clears.
 
 ## 6. The single push
 

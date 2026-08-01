@@ -1,15 +1,16 @@
 # ga sync: cross-harness instruction sync (spec)
 
-Build-ready spec assembled from wayfinder map [floklein/git-agents#4](https://github.com/floklein/git-agents/issues/4), amended for the reshaped subcommand surface from map [floklein/git-agents#25](https://github.com/floklein/git-agents/issues/25). Each section links the decision ticket that holds its rationale.
+Build-ready spec assembled from wayfinder map [floklein/git-agents#4](https://github.com/floklein/git-agents/issues/4), amended for the reshaped subcommand surface from map [floklein/git-agents#25](https://github.com/floklein/git-agents/issues/25), and extended with the `edit` subcommand from [#45](https://github.com/floklein/git-agents/issues/45). Each section links the decision ticket that holds its rationale.
 
 ## Overview
 
 git-agents pivots to **skill-first, for the whole product** ([#7](https://github.com/floklein/git-agents/issues/7)). The product becomes an Agent Skill (a `SKILL.md` plus deterministic scripts) installed into all five supported harnesses: Claude Code, Codex, Cursor, Gemini CLI, OpenCode.
 
-The user surface is four items ([#28](https://github.com/floklein/git-agents/issues/28)):
+The user surface is five items ([#28](https://github.com/floklein/git-agents/issues/28), extended by [#45](https://github.com/floklein/git-agents/issues/45)):
 
 - `/git-agents sync`: **transport**. Configs are treated independently and copied to and from the repo, git-native, with agent-resolved conflicts. The canonical is never involved.
 - `/git-agents sync unify`: **convergence**. Transport first, then the per-harness global instruction files (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, ...) merge into one canonical version and every copy regenerates.
+- `/git-agents edit <request>`: **freeform canonical edit**. The convergence flow with one extra drafting input: the agent interprets the request (add, reword, remove) and folds it into the proposed canonical alongside any drift.
 - `/git-agents status`: read-only report.
 - `/git-agents setup`: one-time onboarding.
 
@@ -193,10 +194,10 @@ Drift detection: a generated file whose hash differs from `generated.<h>.hash` h
 
 ## SKILL.md surface ([#13](https://github.com/floklein/git-agents/issues/13); surface reshaped per [#28](https://github.com/floklein/git-agents/issues/28))
 
-- **User-invoked with subcommands.** The skill fires by name with an argument: `/git-agents setup`, `/git-agents sync`, `/git-agents sync unify`, `/git-agents status`. Frontmatter: `name: git-agents`, `disable-model-invocation: true`, and a human-facing one-line `description` ("Sync AI harness files and global instructions across machines and harnesses via git. Subcommands: setup, sync, sync unify, status."). Claude Code and Cursor honor `disable-model-invocation`; harnesses that treat it as an unknown field ignore it gracefully, and the lean description keeps context load near zero either way.
-- **Subcommand router.** The body opens with a router: the first argument word selects `setup` (onboarding: remote config and clone), `sync` (transport), or `status` (drift and caveat report). When the first word is `sync`, an optional second word `unify` selects the full convergence workflow; any other second word gets a hint listing `sync` and `sync unify`. No argument, or an unknown first word, runs `status` and lists the surface. When the `~/.git-agents` clone is absent, **every branch routes to `setup`** before doing anything else. `pull` and `push` are no longer user subcommands.
+- **User-invoked with subcommands.** The skill fires by name with an argument: `/git-agents setup`, `/git-agents sync`, `/git-agents sync unify`, `/git-agents edit <request>`, `/git-agents status`. Frontmatter: `name: git-agents`, `disable-model-invocation: true`, and a human-facing one-line `description` ("Sync AI harness files and global instructions across machines and harnesses via git. Subcommands: setup, sync, sync unify, edit, status."). Claude Code and Cursor honor `disable-model-invocation`; harnesses that treat it as an unknown field ignore it gracefully, and the lean description keeps context load near zero either way.
+- **Subcommand router.** The body opens with a router: the first argument word selects `setup` (onboarding: remote config and clone), `sync` (transport), `edit` (freeform canonical edit, [#45](https://github.com/floklein/git-agents/issues/45)), or `status` (drift and caveat report). When the first word is `sync`, an optional second word `unify` selects the full convergence workflow; any other second word gets a hint listing `sync` and `sync unify`. When the first word is `edit`, everything after it is the freeform edit request. No argument, or an unknown first word, runs `status` and lists the surface. When the `~/.git-agents` clone is absent, **every branch routes to `setup`** before doing anything else. `pull` and `push` are no longer user subcommands.
 - **Shared contract inline, branch detail disclosed.** What every branch needs stays in `SKILL.md`: the script command surface, the confirm gate (exact script-rendered diffs, No default), and the targeted-question style. What only some branches reach is disclosed to sibling reference files (the transport conflict flow, the unify flow, the Cursor pointer instructions), keeping the router legible.
-- **Bootstrap redirects** `setup`, `sync`, and `status` typed at the terminal into the skill; legacy `pull` and `push` arguments print that they merged into `/git-agents sync`.
+- **Bootstrap redirects** `setup`, `sync`, `edit`, and `status` typed at the terminal into the skill; legacy `pull` and `push` arguments print that they merged into `/git-agents sync`.
 - Per-harness invocation: Claude Code and Cursor `/git-agents <subcommand>`; Codex `$git-agents <subcommand>`; OpenCode via its `skill` tool; Gemini CLI shows its consent prompt on activation (expected, documented).
 
 ## Acceptance criteria

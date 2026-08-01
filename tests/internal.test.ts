@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import {
@@ -8,6 +8,7 @@ import {
   type StatusReport,
 } from "../src/internal/commands";
 import { parseInternalArgs, runInternalCli } from "../src/internal/cli";
+import type { VersionCheckResult } from "../src/internal/versionCheck";
 import { snapshotSyncPath } from "../src/utils/agents";
 
 let tmpDirs: string[] = [];
@@ -148,35 +149,194 @@ describe("runInternalCommand", () => {
   });
 });
 
+describe("version-check", () => {
+  async function check(input: unknown, cliVersion?: string) {
+    const deps = { ...makeDeps(), ...(cliVersion ? { cliVersion } : {}) };
+    const outcome = await runInternalCommand("version-check", input, deps);
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("unreachable");
+    return outcome.result as VersionCheckResult;
+  }
+
+  it("reports an update when the skill is older than the CLI", async () => {
+    const result = await check({ skillVersion: "1.0.0" }, "1.1.0");
+
+    expect(result).toEqual({
+      skillVersion: "1.0.0",
+      cliVersion: "1.1.0",
+      updateAvailable: true,
+    });
+  });
+
+  it("reports no update for an equal or newer skill", async () => {
+    expect((await check({ skillVersion: "1.1.0" }, "1.1.0")).updateAvailable).toBe(false);
+    expect((await check({ skillVersion: "2.0.0" }, "1.1.0")).updateAvailable).toBe(false);
+  });
+
+  it("compares segments numerically, not lexically", async () => {
+    expect((await check({ skillVersion: "1.9.0" }, "1.10.0")).updateAvailable).toBe(true);
+    expect((await check({ skillVersion: "1.10.0" }, "1.9.0")).updateAvailable).toBe(false);
+  });
+
+  it("never errors: missing or malformed input means no update", async () => {
+    expect(await check(undefined, "1.1.0")).toEqual({
+      skillVersion: null,
+      cliVersion: "1.1.0",
+      updateAvailable: false,
+    });
+    expect((await check({}, "1.1.0")).updateAvailable).toBe(false);
+    expect((await check({ skillVersion: "banana" }, "1.1.0")).updateAvailable).toBe(false);
+    expect((await check({ skillVersion: 42 }, "1.1.0")).updateAvailable).toBe(false);
+  });
+
+  it("defaults the CLI version from the package manifest", async () => {
+    const pkg = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    );
+
+    const result = await check({ skillVersion: "0.0.1" });
+
+    expect(result.cliVersion).toBe(pkg.version);
+    expect(result.updateAvailable).toBe(true);
+  });
+
+  it("appears in the unknown-command help list", async () => {
+    const outcome = await runInternalCommand("nope", undefined, makeDeps());
+
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.error.message).toContain("version-check");
+  });
+});
+
 describe("parseInternalArgs", () => {
-  it("rejects a missing command", () => {
-    const parsed = parseInternalArgs([]);
+  it("rejects a missing command", async () => {
+    const parsed = await parseInternalArgs([]);
 
     expect("error" in parsed).toBe(true);
     if ("error" in parsed) expect(parsed.error.code).toBe("missing-command");
   });
 
-  it("parses a bare command with no input", () => {
-    const parsed = parseInternalArgs(["status"]);
+  it("parses a bare command with no input", async () => {
+    const parsed = await parseInternalArgs(["status"]);
 
     expect(parsed).toEqual({ command: "status", input: undefined });
   });
 
-  it("parses JSON input", () => {
-    const parsed = parseInternalArgs(["status", "--input", '{"a":1}']);
+  it("parses JSON input", async () => {
+    const parsed = await parseInternalArgs(["status", "--input", '{"a":1}']);
 
     expect(parsed).toEqual({ command: "status", input: { a: 1 } });
   });
 
-  it("rejects malformed JSON input as a structured error", () => {
-    const parsed = parseInternalArgs(["status", "--input", "{nope"]);
+  it("rejects malformed JSON input as a structured error", async () => {
+    const parsed = await parseInternalArgs(["status", "--input", "{nope"]);
 
     expect("error" in parsed).toBe(true);
     if ("error" in parsed) expect(parsed.error.code).toBe("invalid-input");
   });
 
-  it("rejects --input without a value", () => {
-    const parsed = parseInternalArgs(["status", "--input"]);
+  it("rejects --input without a value", async () => {
+    const parsed = await parseInternalArgs(["status", "--input"]);
+
+    expect("error" in parsed).toBe(true);
+    if ("error" in parsed) expect(parsed.error.code).toBe("invalid-input");
+  });
+
+  it("reads input from a file, preserving backslashes byte-for-byte", async () => {
+    const dir = makeTmpDir("ga-internal-input");
+    const payload = {
+      content: "use `C:\\nvm4w\\nodejs\\npm.cmd`\nnext line\r\nand `backticks`",
+    };
+    const file = join(dir, "input.json");
+    writeFileSync(file, JSON.stringify(payload), "utf8");
+
+    const parsed = await parseInternalArgs(["stage", "--input-file", file]);
+
+    expect(parsed).toEqual({ command: "stage", input: payload });
+  });
+
+  it("reads input from stdin when --input is -", async () => {
+    const parsed = await parseInternalArgs(["stage", "--input", "-"], {
+      readStdin: async () => '{"a":"C:\\\\nvm4w\\\\nodejs\\\\npm.cmd"}',
+    });
+
+    expect(parsed).toEqual({
+      command: "stage",
+      input: { a: "C:\\nvm4w\\nodejs\\npm.cmd" },
+    });
+  });
+
+  it("rejects --input-file without a value", async () => {
+    const parsed = await parseInternalArgs(["stage", "--input-file"]);
+
+    expect("error" in parsed).toBe(true);
+    if ("error" in parsed) expect(parsed.error.code).toBe("invalid-input");
+  });
+
+  it("rejects an unreadable input file, naming the channel", async () => {
+    const parsed = await parseInternalArgs([
+      "stage",
+      "--input-file",
+      join(makeTmpDir("ga-internal-input"), "missing.json"),
+    ]);
+
+    expect("error" in parsed).toBe(true);
+    if ("error" in parsed) {
+      expect(parsed.error.code).toBe("invalid-input");
+      expect(parsed.error.message).toContain("--input-file");
+    }
+  });
+
+  it("rejects invalid JSON from the file channel, naming the channel", async () => {
+    const file = join(makeTmpDir("ga-internal-input"), "input.json");
+    writeFileSync(file, "{nope", "utf8");
+
+    const parsed = await parseInternalArgs(["stage", "--input-file", file]);
+
+    expect("error" in parsed).toBe(true);
+    if ("error" in parsed) {
+      expect(parsed.error.code).toBe("invalid-input");
+      expect(parsed.error.message).toContain("--input-file");
+    }
+  });
+
+  it("rejects invalid JSON from stdin, naming the channel", async () => {
+    const parsed = await parseInternalArgs(["stage", "--input", "-"], {
+      readStdin: async () => "{nope",
+    });
+
+    expect("error" in parsed).toBe(true);
+    if ("error" in parsed) {
+      expect(parsed.error.code).toBe("invalid-input");
+      expect(parsed.error.message).toContain("stdin");
+    }
+  });
+
+  it("rejects a failing stdin read, naming the channel", async () => {
+    const parsed = await parseInternalArgs(["stage", "--input", "-"], {
+      readStdin: async () => {
+        throw new Error("stream closed");
+      },
+    });
+
+    expect("error" in parsed).toBe(true);
+    if ("error" in parsed) {
+      expect(parsed.error.code).toBe("invalid-input");
+      expect(parsed.error.message).toContain("stdin");
+    }
+  });
+
+  it("rejects combining --input and --input-file", async () => {
+    const file = join(makeTmpDir("ga-internal-input"), "input.json");
+    writeFileSync(file, "{}", "utf8");
+
+    const parsed = await parseInternalArgs([
+      "stage",
+      "--input",
+      "{}",
+      "--input-file",
+      file,
+    ]);
 
     expect("error" in parsed).toBe(true);
     if ("error" in parsed) expect(parsed.error.code).toBe("invalid-input");

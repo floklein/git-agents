@@ -48,6 +48,8 @@ function fakeSetupDeps(
     writeConfig: (config: Config) =>
       writeConfig(config, deps.configDir, deps.configFile),
     gitSetRemoteUrl: async () => ok(),
+    countUnpushedCommits: async () => 0,
+    removeClone: () => rmSync(deps.configDir, { recursive: true, force: true }),
     ...overrides,
   };
 }
@@ -217,16 +219,23 @@ describe("runSetup", () => {
     );
   });
 
-  it("reconfigures an already-cloned machine when forced", async () => {
+  it("re-clones fresh when forced on an already-cloned machine", async () => {
     const deps = makeDeps();
     writeFileSync(deps.configFile, JSON.stringify({ remote: "gh" }), "utf8");
-    mkdirSync(join(deps.configDir, ".git"), { recursive: true });
+    mkdirSync(join(deps.configDir, ".git", "stale"), { recursive: true });
+    const cloned: string[] = [];
     const remoteUpdates: string[] = [];
 
     const result = await runSetup(
       deps,
       { remote: "git", repoUrl: "git@example.com:me/new.git", force: true },
       fakeSetupDeps(deps, {
+        cloneRepo: async (url) => {
+          cloned.push(url);
+          expect(existsSync(join(deps.configDir, ".git", "stale"))).toBe(false);
+          mkdirSync(join(deps.configDir, ".git"), { recursive: true });
+          return ok();
+        },
         gitSetRemoteUrl: async (_dir, url) => {
           remoteUpdates.push(url);
           return ok();
@@ -234,8 +243,50 @@ describe("runSetup", () => {
       }),
     );
 
-    expect(remoteUpdates).toEqual(["git@example.com:me/new.git"]);
+    expect(cloned).toEqual(["git@example.com:me/new.git"]);
+    expect(remoteUpdates).toEqual([]);
+    expect(result.recloned).toBe(true);
     expect(result.config.remote).toBe("git");
+    expect(readConfig(deps.configFile)).toEqual(result.config);
+  });
+
+  it("refuses a forced re-clone that would discard unpushed commits", async () => {
+    const deps = makeDeps();
+    writeFileSync(deps.configFile, JSON.stringify({ remote: "gh" }), "utf8");
+    mkdirSync(join(deps.configDir, ".git"), { recursive: true });
+
+    await expectSetupError(
+      runSetup(
+        deps,
+        { remote: "gh", force: true },
+        fakeSetupDeps(deps, { countUnpushedCommits: async () => 2 }),
+      ),
+      "unpushed-commits",
+    );
+    expect(existsSync(join(deps.configDir, ".git"))).toBe(true);
+  });
+
+  it("discards unpushed commits on a forced re-clone with discardLocal", async () => {
+    const deps = makeDeps();
+    writeFileSync(deps.configFile, JSON.stringify({ remote: "gh" }), "utf8");
+    mkdirSync(join(deps.configDir, ".git"), { recursive: true });
+
+    const result = await runSetup(
+      deps,
+      { remote: "gh", force: true, discardLocal: true },
+      fakeSetupDeps(deps, { countUnpushedCommits: async () => 2 }),
+    );
+
+    expect(result.recloned).toBe(true);
+    expect(result.config).toEqual({ remote: "gh" });
+  });
+
+  it("does not report a re-clone on first-time setup", async () => {
+    const deps = makeDeps();
+
+    const result = await runSetup(deps, { remote: "gh" }, fakeSetupDeps(deps));
+
+    expect(result.recloned).toBeUndefined();
   });
 
   it("flows through the command envelope with typed errors", async () => {

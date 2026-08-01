@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import {
@@ -17,6 +17,7 @@ import {
   ghCreateRepo,
   ghGetRepoCloneUrl,
   ghRepoExists,
+  gitCountUnpushedCommits,
   gitSetRemoteUrl,
 } from "../utils/shell";
 import { readConfig, writeConfig } from "../utils/config";
@@ -27,11 +28,16 @@ import type { InternalDeps } from "./commands";
 export const GH_REPO_NAME = "git-agents-remote";
 
 const SetupInputSchema = z.discriminatedUnion("remote", [
-  z.object({ remote: z.literal("gh"), force: z.boolean().optional() }),
+  z.object({
+    remote: z.literal("gh"),
+    force: z.boolean().optional(),
+    discardLocal: z.boolean().optional(),
+  }),
   z.object({
     remote: z.literal("git"),
     repoUrl: z.string().min(1),
     force: z.boolean().optional(),
+    discardLocal: z.boolean().optional(),
   }),
 ]);
 
@@ -47,7 +53,10 @@ export type SetupFlowDeps = Pick<
   | "isAlreadyCloned"
   | "writeConfig"
   | "gitSetRemoteUrl"
->;
+> & {
+  countUnpushedCommits: () => Promise<number>;
+  removeClone: () => void;
+};
 
 export function defaultSetupFlowDeps(deps: InternalDeps): SetupFlowDeps {
   return {
@@ -62,6 +71,14 @@ export function defaultSetupFlowDeps(deps: InternalDeps): SetupFlowDeps {
     writeConfig: (config) =>
       writeConfig(config, deps.configDir, deps.configFile),
     gitSetRemoteUrl,
+    countUnpushedCommits: () => gitCountUnpushedCommits(deps.configDir),
+    removeClone: () =>
+      rmSync(deps.configDir, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 100,
+      }),
   };
 }
 
@@ -70,6 +87,7 @@ export type SetupResult = {
   config: Config;
   repoUrl?: string;
   createdRepo?: boolean;
+  recloned?: boolean;
 };
 
 export async function runSetup(
@@ -97,8 +115,23 @@ export async function runSetup(
   if (existing && clonePresent && !input.force) {
     throw new InternalCommandError(
       "already-configured",
-      `This machine is already configured (remote: ${existing.remote}). Pass force:true to reconfigure the remote.`,
+      `This machine is already configured (remote: ${existing.remote}). Pass force:true to re-clone from the remote.`,
     );
+  }
+
+  // force with a clone present means re-clone: the recovery path for a
+  // rewritten remote. Guard before any deletion or network work.
+  const reclone = input.force === true && flowDeps.isAlreadyCloned();
+  if (reclone && !input.discardLocal) {
+    const unpushed = await flowDeps.countUnpushedCommits();
+    if (unpushed > 0) {
+      throw new InternalCommandError(
+        "unpushed-commits",
+        `Re-cloning would discard ${unpushed} local commit(s) not on any remote ref. ` +
+          "If a transport is in progress, run transport-abort first. " +
+          "Pass discardLocal:true to discard them and re-clone anyway.",
+      );
+    }
   }
 
   let url: string;
@@ -140,6 +173,10 @@ export async function runSetup(
     url = input.repoUrl;
   }
 
+  // Delete only after the target remote resolved, so a gh or URL failure
+  // never costs the existing clone.
+  if (reclone) flowDeps.removeClone();
+
   const cloned = await runClone(url, input.remote, deps.configDir, flowDeps);
   if (cloned.type === "error") {
     throw new InternalCommandError("clone-failed", cloned.message);
@@ -150,5 +187,6 @@ export async function runSetup(
     config: cloned.config,
     repoUrl: url,
     createdRepo,
+    ...(reclone ? { recloned: true } : {}),
   };
 }

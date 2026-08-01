@@ -11,6 +11,8 @@ Run `transport-begin`. It records the pre-sync point (kept across retries, so ab
 
 If it reports `transport-in-progress`, a previous run never finished: inspect with the user and either resolve it or run `transport-abort`.
 
+If it reports `unrelated-histories`, the remote history was rewritten and no longer shares a base with the local clone. Relay the remedy: run `transport-abort` to restore the pre-sync state, re-clone with `setup` and `force:true`, then run the sync again. Local harness files are not affected.
+
 ## 2. Resolve conflicts
 
 Git already merged non-overlapping edits silently; what you see genuinely overlaps. Per file:
@@ -23,7 +25,7 @@ Submit text resolutions with `transport-resolve` (`{"files":[{"path":"...","cont
 
 ## 3. Gate, then commit
 
-Show the user what will change: the incoming and outgoing paths, and for every conflicted file a diff of the resolution against both sides. **No is the default**; declining means `transport-abort`, which restores the recorded pre-sync state even when the merge completed cleanly on its own. On yes, run `transport-commit`. It completes the merge, pushes, then mirrors the merged result back into the home directory, so a failed push never touches local files. On `push-failed`, re-running `transport-commit` retries the push safely; on `push-rejected`, origin advanced mid-transport: run `transport-begin` again to merge the new changes first.
+Show the user what will change: the incoming and outgoing paths, and for every conflicted file a diff of the resolution against both sides. Ask for confirmation per the gate rule (SKILL.md, "The gate"). Declining means `transport-abort`, which restores the recorded pre-sync state even when the merge completed cleanly on its own. On yes, run `transport-commit`. It completes the merge, pushes, then mirrors the merged result back into the home directory, so a failed push never touches local files. On `push-failed`, re-running `transport-commit` retries the push safely; on `push-rejected`, origin advanced mid-transport: run `transport-begin` again to merge the new changes first.
 
 ## 4. Report
 
