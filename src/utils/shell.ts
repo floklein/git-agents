@@ -5,6 +5,7 @@ import {
 } from "node:child_process";
 import type { Readable } from "node:stream";
 import type { ShellResult } from "../types";
+import { errorMessage } from "./errors";
 
 const MAX_CAPTURED_OUTPUT_LENGTH = 64 * 1024;
 
@@ -87,7 +88,7 @@ export async function runCommand(
     } catch (error) {
       finish({
         ok: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
       return;
     }

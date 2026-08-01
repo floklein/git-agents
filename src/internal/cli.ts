@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { errorMessage } from "../utils/errors";
 import {
   defaultInternalDeps,
   runInternalCommand,
@@ -62,8 +63,9 @@ export async function parseInternalArgs(
     try {
       raw = readFile(path);
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      return inputError(`Could not read --input-file ${path}: ${reason}`);
+      return inputError(
+        `Could not read --input-file ${path}: ${errorMessage(error)}`,
+      );
     }
   } else if (inputIndex !== -1) {
     const value = rest[inputIndex + 1];
@@ -75,11 +77,10 @@ export async function parseInternalArgs(
       try {
         raw = await readStdin();
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return inputError(`Could not read stdin: ${reason}`);
+        return inputError(`Could not read stdin: ${errorMessage(error)}`);
       }
     } else {
-      channel = "--input";
+      channel = "the --input payload";
       raw = value;
     }
   } else {

@@ -1,6 +1,7 @@
 import { existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+import pkg from "../../package.json" with { type: "json" };
 import { AGENT_DEFS } from "../utils/agentDefs";
 import { snapshotSyncPath } from "../utils/agents";
 import { CONFIG_DIR, CONFIG_FILE, getLocalSyncPath, readConfig } from "../utils/config";
@@ -188,7 +189,8 @@ const COMMANDS: Record<
   "transport-abort": (deps) => runTransportAbort(deps),
   setup: (deps, input) =>
     runSetup(deps, input, deps.setup ?? defaultSetupFlowDeps(deps)),
-  "version-check": (deps, input) => runVersionCheck(deps, input),
+  "version-check": (deps, input) =>
+    runVersionCheck(deps.cliVersion ?? pkg.version, input),
   "install-pointer-docs": (deps) => ({
     settingsPath: "Cursor Settings > Rules > User Rules",
     rule:

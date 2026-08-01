@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 // added; each assertion below fails on any surface that lags behind.
 const SURFACE = ["setup", "sync", "sync unify", "edit", "status"];
 const FIRST_WORDS = [
-  ...new Set(SURFACE.map((s) => s.split(" ")[0] ?? s)),
+  ...new Set(SURFACE.map((s) => s.replace(/ .*/, ""))),
 ];
 
 function read(rel: string): string {

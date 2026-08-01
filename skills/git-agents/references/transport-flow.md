@@ -25,7 +25,7 @@ Submit text resolutions with `transport-resolve` (`{"files":[{"path":"...","cont
 
 ## 3. Gate, then commit
 
-Show the user what will change: the incoming and outgoing paths, and for every conflicted file a diff of the resolution against both sides. Ask for confirmation in plain text in the same message, directly below the diffs; never through a structured question tool (gate rule). **No is the default**; declining means `transport-abort`, which restores the recorded pre-sync state even when the merge completed cleanly on its own. On yes, run `transport-commit`. It completes the merge, pushes, then mirrors the merged result back into the home directory, so a failed push never touches local files. On `push-failed`, re-running `transport-commit` retries the push safely; on `push-rejected`, origin advanced mid-transport: run `transport-begin` again to merge the new changes first.
+Show the user what will change: the incoming and outgoing paths, and for every conflicted file a diff of the resolution against both sides. Ask for confirmation per the gate rule (SKILL.md, "The gate"). Declining means `transport-abort`, which restores the recorded pre-sync state even when the merge completed cleanly on its own. On yes, run `transport-commit`. It completes the merge, pushes, then mirrors the merged result back into the home directory, so a failed push never touches local files. On `push-failed`, re-running `transport-commit` retries the push safely; on `push-rejected`, origin advanced mid-transport: run `transport-begin` again to merge the new changes first.
 
 ## 4. Report
 

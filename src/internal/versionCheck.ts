@@ -1,11 +1,12 @@
-import pkg from "../../package.json" with { type: "json" };
-import type { InternalDeps } from "./commands";
+import { z } from "zod";
 
 export type VersionCheckResult = {
   skillVersion: string | null;
   cliVersion: string;
   updateAvailable: boolean;
 };
+
+const VersionCheckInputSchema = z.object({ skillVersion: z.string() });
 
 function parseVersion(version: string): number[] | null {
   const trimmed = version.trim();
@@ -27,15 +28,11 @@ function isOlder(a: number[], b: number[]): boolean {
 // agent must have nothing to relay except a genuine offer, so anything
 // unparseable simply reads as "no update".
 export function runVersionCheck(
-  deps: InternalDeps,
+  cliVersion: string,
   rawInput: unknown,
 ): VersionCheckResult {
-  const cliVersion = deps.cliVersion ?? pkg.version;
-  const raw =
-    typeof rawInput === "object" && rawInput !== null
-      ? (rawInput as Record<string, unknown>).skillVersion
-      : undefined;
-  const skillVersion = typeof raw === "string" ? raw.trim() : null;
+  const parsed = VersionCheckInputSchema.safeParse(rawInput);
+  const skillVersion = parsed.success ? parsed.data.skillVersion.trim() : null;
   const skill = skillVersion === null ? null : parseVersion(skillVersion);
   const cli = parseVersion(cliVersion);
   return {

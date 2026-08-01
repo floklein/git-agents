@@ -21,6 +21,7 @@ import {
   sep,
 } from "path";
 import type { SyncPathSnapshot, SyncPathStatus } from "../types";
+import { errorMessage } from "./errors";
 
 function normalizedRelativePath(root: string, path: string): string {
   const value = relative(root, path);
@@ -308,10 +309,6 @@ function removePath(path: string): void {
     maxRetries: 3,
     retryDelay: 100,
   });
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 export function mirrorSyncPath(

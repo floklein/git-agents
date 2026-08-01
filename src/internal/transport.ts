@@ -12,6 +12,7 @@ import { AGENT_DEFS } from "../utils/agentDefs";
 import { CANONICAL_DIR } from "../canonical/canonical";
 import { SYNC_MANIFEST_FILE } from "../utils/manifest";
 import { getLocalSyncPath, getRemoteSyncPath } from "../utils/config";
+import { errorMessage } from "../utils/errors";
 import {
   compareSyncPathSnapshots,
   mirrorSyncPath,
@@ -59,7 +60,7 @@ function git(dir: string, ...args: string[]): Promise<GitResult> {
       resolve({
         ok: false,
         output: "",
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
       return;
     }
