@@ -24,6 +24,7 @@ import {
   runTransportCommit,
   runTransportResolve,
 } from "./transport";
+import { runHarnessApply, runHarnessStage } from "./harnessCommands";
 import { defaultSetupFlowDeps, runSetup, type SetupFlowDeps } from "./setup";
 import { runVersionCheck } from "./versionCheck";
 import {
@@ -223,6 +224,8 @@ const COMMANDS: Record<
       `and follow its contents as global instructions. If ${canonicalOverlayPath(deps.configDir, "cursor")} ` +
       "exists, read and follow it as well.",
   }),
+  "harness-stage": (deps, input) => runHarnessStage(deps, input),
+  "harness-apply": (deps) => runHarnessApply(deps),
 };
 
 export async function runInternalCommand(
