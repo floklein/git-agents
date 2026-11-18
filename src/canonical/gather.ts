@@ -1,7 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { getLocalSyncPath } from "../utils/config";
+import { requireHarnessSet, type Harness } from "../utils/harnessSet";
 import {
-  GENERATED_TARGETS,
+  generatedTargets,
   hashContent,
   readCanonical,
   withTrailingNewline,
@@ -18,7 +19,10 @@ export type MarkerParse = {
 
 const BEGIN_CORE = /<!-- ga:begin core v=([0-9a-f]+) -->\n/;
 const END_CORE = "<!-- ga:end core -->\n";
-const BEGIN_OVERLAY = /<!-- ga:begin overlay harness=([a-z]+) v=([0-9a-f]+) -->\n/;
+// The id is a built-in overlay id or a custom harness id (lowercase letters,
+// digits and hyphens, starting with a letter).
+const BEGIN_OVERLAY =
+  /<!-- ga:begin overlay harness=([a-z][a-z0-9-]*) v=([0-9a-f]+) -->\n/;
 const END_OVERLAY = "<!-- ga:end overlay -->\n";
 
 // Missing or half-open markers degrade the whole file to unattributed
@@ -164,11 +168,20 @@ function gatherFileRegions(
   };
 }
 
-export function gatherDrift(configDir: string, homeDir: string): GatherResult {
-  const canonical = readCanonical(configDir);
+/**
+ * Drift of every generated file of a harness set against the canonical. The
+ * set defaults to the clone's, which refuses an invalid declarations file;
+ * pass one to gather over another set.
+ */
+export function gatherDrift(
+  configDir: string,
+  homeDir: string,
+  harnesses: readonly Harness[] = requireHarnessSet(configDir),
+): GatherResult {
+  const canonical = readCanonical(configDir, harnesses);
   const fileHashes: Record<string, string | null> = {};
 
-  const files = GENERATED_TARGETS.map((target): GatherFile => {
+  const files = generatedTargets(harnesses).map((target): GatherFile => {
     const path = getLocalSyncPath(target.syncPath, homeDir);
     const present = existsSync(path);
     const content = present ? readFileSync(path, "utf8") : null;
