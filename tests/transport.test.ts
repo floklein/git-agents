@@ -745,32 +745,438 @@ describe("transport with custom harnesses", () => {
     expect(readHome(b, ".claude/CLAUDE.md")).toBe("claude rules\n");
   }, 60000);
 
-  it("refuses transport-begin when the merge brings an invalid declarations file", async () => {
+  function gitOut(deps: InternalDeps, ...args: string[]): string {
+    return execFileSync("git", ["-C", deps.configDir, ...args], {
+      encoding: "utf8",
+    }).trim();
+  }
+
+  function readDeclarations(deps: InternalDeps): unknown {
+    return JSON.parse(
+      readFileSync(join(deps.configDir, DECLARATIONS_FILE), "utf8"),
+    );
+  }
+
+  it("keeps a declaration that was never committed when the sync is declined", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeHome(a, ".claude/CLAUDE.md", "claude rules\n");
+    await fullSync(a);
+    writeDeclarations(a, DSH);
+    writeHome(a, ".dsh/AGENTS.md", "dsh instructions\n");
+
+    const begin = await runTransportBegin(a);
+    expect(begin.outgoing).toEqual([
+      { path: ".dsh/AGENTS.md", status: "added" },
+    ]);
+    const abort = await runTransportAbort(a);
+
+    expect(abort.aborted).toBe(true);
+    expect(readDeclarations(a)).toEqual(DSH);
+    // The declaration is committed; the files mirrored for it are undone.
+    expect(gitOut(a, "status", "--porcelain")).not.toContain(DECLARATIONS_FILE);
+    expect(existsSync(join(a.configDir, ".dsh"))).toBe(false);
+    expect(readHome(a, ".dsh/AGENTS.md")).toBe("dsh instructions\n");
+  }, 30000);
+
+  it("keeps a declaration made on a machine that never synced when the sync is declined", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeDeclarations(a, DSH);
+    writeHome(a, ".dsh/AGENTS.md", "dsh instructions\n");
+
+    await runTransportBegin(a);
+    await runTransportAbort(a);
+
+    expect(readDeclarations(a)).toEqual(DSH);
+    expect(gitOut(a, "ls-files")).toBe(DECLARATIONS_FILE);
+  }, 30000);
+
+  function remoteDeclarations(bare: string): string | null {
+    try {
+      return execFileSync(
+        "git",
+        ["--git-dir", bare, "show", `main:${DECLARATIONS_FILE}`],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  it("keeps a declaration made while an earlier sync was left unfinished", async () => {
+    const { bare, a, b } = await twoMachines();
+    const original = gitOut(b, "rev-parse", "HEAD");
+    // A rejected push leaves B's transport open, with its pre-sync point.
+    writeHome(b, ".gemini/GEMINI.md", "gemini rules\n");
+    await runTransportBegin(b);
+    writeHome(a, ".codex/AGENTS.md", "codex rules\n");
+    await fullSync(a);
+    await expectCode(runTransportCommit(b, undefined), "push-rejected");
+
+    writeDeclarations(b, DSH);
+    writeHome(b, ".dsh/AGENTS.md", "dsh instructions\n");
+    await runTransportBegin(b);
+    await runTransportAbort(b);
+
+    // Back at the point the first run started from, plus the declaration.
+    expect(readDeclarations(b)).toEqual(DSH);
+    expect(gitOut(b, "rev-parse", "HEAD~1")).toBe(original);
+    expect(gitOut(b, "diff", "--name-only", "HEAD~1", "HEAD")).toBe(
+      DECLARATIONS_FILE,
+    );
+    expect(gitOut(b, "status", "--porcelain", "--untracked-files=no")).toBe("");
+    expect(existsSync(join(b.configDir, ".gemini"))).toBe(false);
+
+    await fullSync(b);
+    expect(remoteDeclarations(bare)).toBe(JSON.stringify(DSH, null, 2));
+  }, 60000);
+
+  it("does not take a path this machine removed for one the remote newly declares", async () => {
+    const { a, b } = await twoMachines();
+    writeDeclarations(a, DSH);
+    writeHome(a, ".dsh/AGENTS.md", "dsh instructions\n");
+    await fullSync(a);
+    await fullSync(b);
+    // B removes the declaration by hand; the remote still carries it.
+    rmSync(join(b.configDir, DECLARATIONS_FILE));
+    writeHome(b, ".dsh/AGENTS.md", "dsh instructions, edited on B\n");
+    writeHome(a, ".claude/CLAUDE.md", "claude rules, edited on A\n");
+    await fullSync(a);
+
+    const begin = await runTransportBegin(b);
+
+    expect(begin).toEqual({
+      state: "clean",
+      outgoing: [],
+      incoming: [{ path: ".claude/CLAUDE.md", status: "modified" }],
+      firstSync: [],
+    });
+  }, 60000);
+
+  const DSH_PATH = { harness: "dsh", name: "DeepSeek Harness" };
+
+  // Two machines that already share the repo, before any declaration.
+  async function twoMachines(): Promise<{
+    bare: string;
+    a: InternalDeps;
+    b: InternalDeps;
+  }> {
     const bare = makeBare();
     const a = makeMachine(bare);
     writeHome(a, ".claude/CLAUDE.md", "claude rules\n");
     await fullSync(a);
     const b = makeMachine(bare);
     await fullSync(b);
+    return { bare, a, b };
+  }
 
-    // An invalid file can only reach the remote from outside these commands.
-    writeDeclarations(a, INVALID);
+  it("reports a different file at a newly declared path as a both-added conflict", async () => {
+    const { a, b } = await twoMachines();
+    writeDeclarations(a, DSH);
+    writeHome(a, ".dsh/AGENTS.md", "dsh instructions from A, longer\n");
+    await fullSync(a);
+    writeHome(b, ".dsh/AGENTS.md", "dsh instructions from B\n");
+
+    const begin = await runTransportBegin(b);
+
+    expect(begin.state).toBe("conflicts");
+    if (begin.state !== "conflicts") return;
+    expect(begin.conflicts).toEqual([
+      {
+        path: ".dsh/AGENTS.md",
+        binary: false,
+        base: null,
+        local: "dsh instructions from B\n",
+        remote: "dsh instructions from A, longer\n",
+      },
+    ]);
+    expect(begin.outgoing).toEqual([
+      { path: ".dsh/AGENTS.md", status: "added" },
+    ]);
+    expect(begin.incoming).toContain(".dsh/AGENTS.md");
+    expect(begin.firstSync).toEqual([
+      { ...DSH_PATH, path: ".dsh/AGENTS.md", direction: "outgoing", fileCount: 1, totalBytes: 24 },
+      { ...DSH_PATH, path: ".dsh/AGENTS.md", direction: "incoming", fileCount: 1, totalBytes: 32 },
+    ]);
+    expect(readHome(b, ".dsh/AGENTS.md")).toBe("dsh instructions from B\n");
+
+    await runTransportResolve(b, {
+      files: [{ path: ".dsh/AGENTS.md", content: "dsh instructions from A and B\n" }],
+    });
+    await runTransportCommit(b, undefined);
+    expect(readHome(b, ".dsh/AGENTS.md")).toBe("dsh instructions from A and B\n");
+    await fullSync(a);
+    expect(readHome(a, ".dsh/AGENTS.md")).toBe("dsh instructions from A and B\n");
+  }, 60000);
+
+  it("lists each path synced for the first time, on the declaring and the receiving machine", async () => {
+    const { a, b } = await twoMachines();
+    writeDeclarations(a, DSH);
+    writeHome(a, ".claude/CLAUDE.md", "claude rules, edited\n");
+    writeHome(a, ".dsh/AGENTS.md", "dsh instructions\n");
+    writeHome(a, ".dsh/skills/review/SKILL.md", "review skill\n");
+    writeHome(a, ".dsh/skills/plan/SKILL.md", "plan skill, longer\n");
+
+    const declaring = await runTransportBegin(a);
+
+    expect(declaring.state).toBe("clean");
+    expect(declaring.outgoing).toEqual([
+      { path: ".claude/CLAUDE.md", status: "modified" },
+      { path: ".dsh/AGENTS.md", status: "added" },
+      { path: ".dsh/skills", status: "added" },
+    ]);
+    expect(declaring.firstSync).toEqual([
+      { ...DSH_PATH, path: ".dsh/AGENTS.md", direction: "outgoing", fileCount: 1, totalBytes: 17 },
+      { ...DSH_PATH, path: ".dsh/skills", direction: "outgoing", fileCount: 2, totalBytes: 32 },
+    ]);
+    await runTransportCommit(a, undefined);
+
+    const receiving = await runTransportBegin(b);
+
+    expect(receiving.state).toBe("clean");
+    expect(receiving.outgoing).toEqual([]);
+    expect(receiving.incoming).toEqual([
+      { path: ".claude/CLAUDE.md", status: "modified" },
+      { path: ".dsh/AGENTS.md", status: "added" },
+      { path: ".dsh/skills", status: "added" },
+    ]);
+    expect(receiving.firstSync).toEqual([
+      { ...DSH_PATH, path: ".dsh/AGENTS.md", direction: "incoming", fileCount: 1, totalBytes: 17 },
+      { ...DSH_PATH, path: ".dsh/skills", direction: "incoming", fileCount: 2, totalBytes: 32 },
+    ]);
+    // Nothing reaches the home directory before the gate is accepted.
+    expect(existsSync(join(b.homeDir, ".dsh"))).toBe(false);
+    await runTransportCommit(b, undefined);
+    expect(readHome(b, ".dsh/AGENTS.md")).toBe("dsh instructions\n");
+    expect(readHome(b, ".dsh/skills/plan/SKILL.md")).toBe("plan skill, longer\n");
+
+    // Once synced, the paths are no longer first-time, edited or not.
+    writeHome(b, ".dsh/AGENTS.md", "dsh instructions, edited on B\n");
+    const later = await runTransportBegin(b);
+    expect(later.outgoing).toEqual([
+      { path: ".dsh/AGENTS.md", status: "modified" },
+    ]);
+    expect(later.firstSync).toEqual([]);
+  }, 60000);
+
+  it("lists declared paths as first-time on a machine that joins the repo", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeDeclarations(a, DSH);
+    writeHome(a, ".dsh/AGENTS.md", "dsh instructions\n");
+    await fullSync(a);
+    const b = makeMachine(bare);
+    writeHome(b, ".dsh/skills/review/SKILL.md", "review skill\n");
+
+    const begin = await runTransportBegin(b);
+
+    expect(begin.firstSync).toEqual([
+      { ...DSH_PATH, path: ".dsh/AGENTS.md", direction: "incoming", fileCount: 1, totalBytes: 17 },
+      { ...DSH_PATH, path: ".dsh/skills", direction: "outgoing", fileCount: 1, totalBytes: 13 },
+    ]);
+  }, 30000);
+
+  it("lists nothing as first-time without a declarations file", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeHome(a, ".claude/CLAUDE.md", "claude rules\n");
+
+    const begin = await runTransportBegin(a);
+
+    expect(begin).toEqual({
+      state: "clean",
+      outgoing: [{ path: ".claude/CLAUDE.md", status: "added" }],
+      incoming: [],
+      firstSync: [],
+    });
+  }, 30000);
+
+  // An invalid file can only reach the remote from outside these commands.
+  function pushInvalidDeclarations(deps: InternalDeps): string {
+    writeDeclarations(deps, INVALID);
     for (const args of [
       ["add", DECLARATIONS_FILE],
       ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "invalid"],
       ["push", "origin", "HEAD"],
     ]) {
-      execFileSync("git", ["-C", a.configDir, ...args], { stdio: "ignore" });
+      execFileSync("git", ["-C", deps.configDir, ...args], { stdio: "ignore" });
     }
-    writeHome(a, ".claude/CLAUDE.md", "claude rules, edited on A\n");
+    return JSON.stringify(INVALID, null, 2);
+  }
 
-    const error = await runTransportBegin(b).catch((e: unknown) => e);
+  it("carries an invalid merged declarations file in the conflicts list until it is fixed", async () => {
+    const { bare, a, b } = await twoMachines();
+    const invalidText = pushInvalidDeclarations(a);
 
-    expectInvalidDeclarations(error);
-    expect(readHome(b, ".claude/CLAUDE.md")).toBe("claude rules\n");
+    const begin = await runTransportBegin(b);
+
+    expect(begin.state).toBe("conflicts");
+    if (begin.state !== "conflicts") return;
+    expect(begin.conflicts).toHaveLength(1);
+    const conflict = begin.conflicts[0]!;
+    expect(conflict).toMatchObject({
+      path: DECLARATIONS_FILE,
+      binary: false,
+      base: null,
+      local: null,
+      remote: invalidText,
+      merged: invalidText,
+    });
+    expect(conflict.problems?.map(({ code, harness }) => [code, harness])).toEqual([
+      ["unknown-field", "dsh"],
+      ["path-denylisted", "keys"],
+    ]);
+    expect(begin.incoming).toEqual([DECLARATIONS_FILE]);
+    expect(begin.firstSync).toEqual([]);
+
+    // Every problem, then the way out of the merge.
+    const expectInvalidMerge = (error: unknown): void => {
+      expect(error).toBeInstanceOf(InternalCommandError);
+      const { code, message } = error as InternalCommandError;
+      expect(code).toBe("invalid-harness-declarations");
+      expect(message).toContain('harness "dsh": unknown field "color"');
+      expect(message).toContain('".ssh/keys" is in the credential location ".ssh"');
+      expect(message).toContain("transport-resolve");
+      expect(message).toContain("transport-abort");
+    };
+
+    // Blocked until the file is fixed.
+    expectInvalidMerge(
+      await runTransportCommit(b, undefined).catch((e: unknown) => e),
+    );
+    await expectCode(runTransportBegin(b), "transport-in-progress");
+    expect(remoteDeclarations(bare)).toBe(invalidText);
+
+    // Invalid contents are rejected on the way in and nothing is written.
+    expectInvalidMerge(
+      await runTransportResolve(b, {
+        files: [{ path: DECLARATIONS_FILE, content: invalidText }],
+      }).catch((e: unknown) => e),
+    );
+    await expectCode(
+      runTransportResolve(b, {
+        files: [{ path: DECLARATIONS_FILE, content: "{ not json" }],
+      }),
+      "invalid-harness-declarations",
+    );
+    await expectCode(
+      runTransportResolve(b, {
+        files: [{ path: DECLARATIONS_FILE, side: "remote" }],
+      }),
+      "invalid-harness-declarations",
+    );
     await expectCode(runTransportCommit(b, undefined), "invalid-harness-declarations");
+
+    const fixed = JSON.stringify(DSH, null, 2);
+    const resolved = await runTransportResolve(b, {
+      files: [{ path: DECLARATIONS_FILE, content: fixed }],
+    });
+    expect(resolved).toEqual({ resolved: [DECLARATIONS_FILE], remaining: [] });
+    // Once valid, the file is no longer open for resolution.
+    await expectCode(
+      runTransportResolve(b, {
+        files: [{ path: DECLARATIONS_FILE, content: fixed }],
+      }),
+      "not-conflicted",
+    );
+
+    const commit = await runTransportCommit(b, undefined);
+    expect(commit).toMatchObject({ mergeCompleted: true, pushed: true });
+    expect(readDeclarations(b)).toEqual(DSH);
+    expect(remoteDeclarations(bare)).toBe(fixed);
+    expect(readHome(b, ".claude/CLAUDE.md")).toBe("claude rules\n");
+  }, 60000);
+
+  it("reports an invalid merged declarations file beside ordinary conflicts, and takes a side for it", async () => {
+    const { bare, a, b } = await twoMachines();
+    writeHome(a, ".claude/CLAUDE.md", "claude rules, edited on A\n");
+    await fullSync(a);
+    const invalidText = pushInvalidDeclarations(a);
+    writeHome(b, ".claude/CLAUDE.md", "claude rules, edited on B\n");
+
+    const begin = await runTransportBegin(b);
+
+    expect(begin.state).toBe("conflicts");
+    if (begin.state !== "conflicts") return;
+    expect(begin.conflicts.map(({ path }) => path)).toEqual([
+      ".claude/CLAUDE.md",
+      DECLARATIONS_FILE,
+    ]);
+    expect(begin.conflicts[0]!.problems).toBeUndefined();
+    expect(begin.conflicts[1]).toMatchObject({
+      local: null,
+      remote: invalidText,
+      merged: invalidText,
+    });
+    expect(begin.conflicts[1]!.problems).toHaveLength(2);
+
+    const first = await runTransportResolve(b, {
+      files: [{ path: ".claude/CLAUDE.md", content: "claude rules, edited on A and B\n" }],
+    });
+    expect(first.remaining).toEqual([]);
+    await expectCode(runTransportCommit(b, undefined), "invalid-harness-declarations");
+
+    // This machine declared nothing, so its side is no declarations file.
+    await runTransportResolve(b, {
+      files: [{ path: DECLARATIONS_FILE, side: "local" }],
+    });
+    await runTransportCommit(b, undefined);
+
+    expect(existsSync(join(b.configDir, DECLARATIONS_FILE))).toBe(false);
+    expect(remoteDeclarations(bare)).toBeNull();
+    expect(readHome(b, ".claude/CLAUDE.md")).toBe("claude rules, edited on A and B\n");
+  }, 60000);
+
+  it("reports an invalid merged declarations file when this machine has changes of its own", async () => {
+    const { a, b } = await twoMachines();
+    pushInvalidDeclarations(a);
+    writeHome(b, ".gemini/GEMINI.md", "gemini rules\n");
+    const before = gitOut(b, "rev-parse", "HEAD");
+
+    const begin = await runTransportBegin(b);
+
+    expect(begin.state).toBe("conflicts");
+    if (begin.state !== "conflicts") return;
+    expect(begin.conflicts.map(({ path }) => path)).toEqual([DECLARATIONS_FILE]);
+    expect(begin.outgoing).toEqual([
+      { path: ".gemini/GEMINI.md", status: "added" },
+    ]);
+
+    // Declining restores the clone; the home directory was never touched.
     const aborted = await runTransportAbort(b);
     expect(aborted.aborted).toBe(true);
+    expect(gitOut(b, "rev-parse", "HEAD")).toBe(before);
     expect(existsSync(join(b.configDir, DECLARATIONS_FILE))).toBe(false);
+    expect(readHome(b, ".gemini/GEMINI.md")).toBe("gemini rules\n");
+  }, 60000);
+
+  it("leaves a receiving machine's clone and home directory as they were when the sync is declined", async () => {
+    const { a, b } = await twoMachines();
+    writeDeclarations(a, DSH);
+    writeHome(a, ".dsh/AGENTS.md", "dsh instructions\n");
+    await fullSync(a);
+    const before = gitOut(b, "rev-parse", "HEAD");
+
+    const begin = await runTransportBegin(b);
+    expect(begin.incoming).toEqual([
+      { path: ".dsh/AGENTS.md", status: "added" },
+    ]);
+    const aborted = await runTransportAbort(b);
+
+    expect(aborted.aborted).toBe(true);
+    expect(gitOut(b, "rev-parse", "HEAD")).toBe(before);
+    expect(gitOut(b, "status", "--porcelain", "--untracked-files=no")).toBe("");
+    expect(existsSync(join(b.configDir, DECLARATIONS_FILE))).toBe(false);
+    expect(existsSync(join(b.configDir, ".dsh"))).toBe(false);
+    expect(existsSync(join(b.homeDir, ".dsh"))).toBe(false);
+
+    // The declaration arrives again on the next sync, listed again.
+    const again = await runTransportBegin(b);
+    expect(again.firstSync).toEqual([
+      { ...DSH_PATH, path: ".dsh/AGENTS.md", direction: "incoming", fileCount: 1, totalBytes: 17 },
+    ]);
+    await runTransportCommit(b, undefined);
+    expect(readHome(b, ".dsh/AGENTS.md")).toBe("dsh instructions\n");
   }, 60000);
 });
