@@ -1,17 +1,14 @@
 import { createHash } from "node:crypto";
-import {
-  existsSync,
-  lstatSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { getLocalSyncPath } from "../utils/config";
+import { pathsOnlyIn, type HarnessPath } from "../utils/declaredPaths";
 import {
+  DECLARATIONS_VERSION,
   HARNESS_DECLARATIONS_FILE,
   parseHarnessDeclarations,
+  readDeclarationsFile,
   validateHarnessDeclarations,
   type CustomHarness,
   type DeclarationProblem,
@@ -25,39 +22,37 @@ import {
   removesNothing,
   type RemovalPlan,
 } from "./declarationRemoval";
-import { InternalCommandError } from "./errors";
+import { InternalCommandError, invalidInputError } from "./errors";
+import { requireClone } from "./git";
 import type { InternalDeps } from "./commands";
 
 /** Machine-local, like the canonical stage file: never in the commit scope. */
 export const HARNESS_STAGE_FILE = ".git-agents-harness-stage.json";
 
-const DECLARATIONS_VERSION = 1;
-
-export type HarnessPathField = "instructionsFile" | "syncPaths";
-
-/** One path a custom harness declares, and where in its declaration. */
-export type DeclaredPath = {
-  harness: string;
-  field: HarnessPathField;
-  path: string;
-};
+/** A path that stops syncing, and where in its declaration it was. */
+export type StopSyncingPath = Omit<HarnessPath, "name">;
 
 /** A path that starts syncing, with what the home directory holds there. */
-export type StartSyncingPath = DeclaredPath & {
+export type StartSyncingPath = StopSyncingPath & {
   present: boolean;
   fileCount: number;
   totalBytes: number;
 };
 
-/** What a removal deletes from the sync repo, and only from there. */
-export type RemovalPreview = Pick<
+/**
+ * What a removal deletes from the sync repo, and only from there: previewed
+ * by `harness-stage`, reported again by `harness-apply` once it is done.
+ */
+export type RemovalReport = Pick<
   RemovalPlan,
   | "harnesses"
   | "repoFiles"
   | "overlays"
   | "manifest"
   | "canonicalVersionChanges"
-> & {
+>;
+
+export type RemovalPreview = RemovalReport & {
   /** The statement that goes with every removal. */
   homeFiles: string;
 };
@@ -69,7 +64,7 @@ export type HarnessStageResult = {
   /** The exact diff of the declarations file `harness-apply` would write. */
   file: { path: string; changed: boolean; diff: string };
   startSyncing: StartSyncingPath[];
-  stopSyncing: DeclaredPath[];
+  stopSyncing: StopSyncingPath[];
   /**
    * The repo cleanup `harness-apply` would make, when the proposal removes a
    * harness or a path. Absent when the current file is invalid: there is no
@@ -83,6 +78,10 @@ export type HarnessStageResult = {
   currentProblems: DeclarationProblem[];
 };
 
+// The complete proposed set, `{"harnesses": {...}}`, as any JSON object: what
+// it holds is judged by the declarations validator, which names every problem.
+const StageInputSchema = z.object({}).passthrough();
+
 const StageFileSchema = z.object({
   version: z.literal(1),
   /** The exact text to write; null when no file is to be created. */
@@ -93,41 +92,31 @@ const StageFileSchema = z.object({
 
 type StageFileContent = z.infer<typeof StageFileSchema>;
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function requireClone(configDir: string): void {
-  if (!existsSync(join(configDir, ".git"))) {
-    throw new InternalCommandError(
-      "not-configured",
-      "No sync repository found. Run the setup subcommand first.",
-    );
-  }
-}
-
 /**
  * The raw declarations file of the clone, or null when there is none. A link
  * or a directory at its place is refused: writing through a link could land
  * outside the clone.
  */
 function readCurrentFile(configDir: string): Buffer | null {
-  const filePath = join(configDir, HARNESS_DECLARATIONS_FILE);
-  let stat;
-  try {
-    stat = lstatSync(filePath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return null;
-    throw error;
-  }
-  if (stat.isSymbolicLink() || !stat.isFile()) {
+  const file = readDeclarationsFile(configDir);
+  if (file.state === "not-regular") {
     throw new InternalCommandError(
       "harness-file-not-regular",
       `${HARNESS_DECLARATIONS_FILE} in the sync repo is a link or a directory, not a regular file. ` +
-        `Remedy: remove ${filePath} by hand, then run harness-stage again.`,
+        `Remedy: remove ${join(configDir, HARNESS_DECLARATIONS_FILE)} by hand, then run harness-stage again.`,
     );
   }
-  return readFileSync(filePath);
+  return file.state === "present" ? file.bytes : null;
+}
+
+// The custom harnesses the current file declares. An absent file declares
+// none; an invalid one gives its problems.
+function parseCurrentFile(
+  file: Buffer | null,
+): ReturnType<typeof parseHarnessDeclarations> {
+  return file === null
+    ? { ok: true, harnesses: [] }
+    : parseHarnessDeclarations(file.toString("utf8"));
 }
 
 function hashOf(file: Buffer | null): string | null {
@@ -160,35 +149,15 @@ function renderDeclarationsFile(harnesses: Record<string, unknown>): string {
   return `${JSON.stringify({ version: DECLARATIONS_VERSION, harnesses: sorted }, null, 2)}\n`;
 }
 
-function declaredPaths(harnesses: readonly CustomHarness[]): DeclaredPath[] {
-  return harnesses.flatMap((harness): DeclaredPath[] => [
-    ...(harness.instructionsFile !== undefined
-      ? [
-          {
-            harness: harness.id,
-            field: "instructionsFile" as const,
-            path: harness.instructionsFile,
-          },
-        ]
-      : []),
-    ...harness.syncPaths.map((path) => ({
-      harness: harness.id,
-      field: "syncPaths" as const,
-      path,
-    })),
-  ]);
-}
-
-/**
- * The entries of `paths` whose path is not among `others`, whoever declares
- * it there. Paths compare the way ownership does, case-insensitively.
- */
+// The paths `harnesses` declares and `others` does not, whoever declares them
+// there, as `harness-stage` reports them.
 function pathsNotIn(
-  paths: readonly DeclaredPath[],
-  others: readonly DeclaredPath[],
-): DeclaredPath[] {
-  const known = new Set(others.map((other) => other.path.toLowerCase()));
-  return paths.filter((entry) => !known.has(entry.path.toLowerCase()));
+  harnesses: readonly CustomHarness[],
+  others: readonly CustomHarness[],
+): StopSyncingPath[] {
+  return pathsOnlyIn(buildHarnessSet(harnesses), buildHarnessSet(others)).map(
+    ({ harness, field, path }) => ({ harness, field, path }),
+  );
 }
 
 // The cleanup that goes with replacing one set of declarations by another, or
@@ -197,12 +166,16 @@ function removalBetween(
   configDir: string,
   before: readonly CustomHarness[],
   after: readonly CustomHarness[],
-): { plan: RemovalPlan; apply: () => void } | null {
+): { report: RemovalReport; apply: () => void } | null {
   const kept = buildHarnessSet(after);
   const plan = planRemoval(configDir, buildHarnessSet(before), kept);
-  return removesNothing(plan)
-    ? null
-    : { plan, apply: () => applyRemoval(configDir, plan, kept) };
+  if (removesNothing(plan)) return null;
+  const { harnesses, repoFiles, overlays, manifest, canonicalVersionChanges } =
+    plan;
+  return {
+    report: { harnesses, repoFiles, overlays, manifest, canonicalVersionChanges },
+    apply: () => applyRemoval(configDir, plan, kept),
+  };
 }
 
 /**
@@ -215,17 +188,16 @@ export function runHarnessStage(
   rawInput: unknown,
 ): HarnessStageResult {
   requireClone(deps.configDir);
-  if (!isPlainObject(rawInput)) {
-    throw new InternalCommandError(
-      "invalid-input",
-      'harness-stage input must be the complete proposed set: {"harnesses": {...}}',
-    );
-  }
+  // A rejected proposal must not leave an earlier one for harness-apply.
+  rmSync(join(deps.configDir, HARNESS_STAGE_FILE), { force: true });
+  const parsed = StageInputSchema.safeParse(rawInput);
+  if (!parsed.success) throw invalidInputError("harness-stage", parsed.error);
+  const input = parsed.data;
 
   // The scripts own `version`: a proposal carries the harnesses alone.
   const proposed = validateHarnessDeclarations({
     version: DECLARATIONS_VERSION,
-    ...rawInput,
+    ...input,
   });
   if (!proposed.ok) {
     throw new InternalCommandError(
@@ -237,21 +209,17 @@ export function runHarnessStage(
   }
 
   const currentFile = readCurrentFile(deps.configDir);
-  const current =
-    currentFile === null
-      ? { ok: true as const, harnesses: [] }
-      : parseHarnessDeclarations(currentFile.toString("utf8"));
+  const current = parseCurrentFile(currentFile);
+  const currentHarnesses = current.ok ? current.harnesses : [];
 
   // The scripts never create the file before the first declaration.
   const content =
     currentFile === null && proposed.harnesses.length === 0
       ? null
-      : renderDeclarationsFile(rawInput.harnesses as Record<string, unknown>);
+      : renderDeclarationsFile(input.harnesses as Record<string, unknown>);
 
   const before = textOf(currentFile);
   const after = content ?? "";
-  const proposedPaths = declaredPaths(proposed.harnesses);
-  const currentPaths = declaredPaths(current.ok ? current.harnesses : []);
   const removal = current.ok
     ? removalBetween(deps.configDir, current.harnesses, proposed.harnesses)
     : null;
@@ -262,27 +230,20 @@ export function runHarnessStage(
       changed: before !== after,
       diff: unifiedDiff(before, after, HARNESS_DECLARATIONS_FILE),
     },
-    startSyncing: pathsNotIn(proposedPaths, currentPaths).map((entry) => {
-      const size = measureSyncPath(getLocalSyncPath(entry.path, deps.homeDir));
-      return {
-        ...entry,
-        present: size !== null,
-        fileCount: size?.fileCount ?? 0,
-        totalBytes: size?.totalBytes ?? 0,
-      };
-    }),
-    stopSyncing: pathsNotIn(currentPaths, proposedPaths),
+    startSyncing: pathsNotIn(proposed.harnesses, currentHarnesses).map(
+      (entry) => {
+        const size = measureSyncPath(getLocalSyncPath(entry.path, deps.homeDir));
+        return {
+          ...entry,
+          present: size !== null,
+          fileCount: size?.fileCount ?? 0,
+          totalBytes: size?.totalBytes ?? 0,
+        };
+      },
+    ),
+    stopSyncing: pathsNotIn(currentHarnesses, proposed.harnesses),
     ...(removal !== null
-      ? {
-          removal: {
-            harnesses: removal.plan.harnesses,
-            repoFiles: removal.plan.repoFiles,
-            overlays: removal.plan.overlays,
-            manifest: removal.plan.manifest,
-            canonicalVersionChanges: removal.plan.canonicalVersionChanges,
-            homeFiles: HOME_FILES_STAY,
-          },
-        }
+      ? { removal: { ...removal.report, homeFiles: HOME_FILES_STAY } }
       : {}),
     currentProblems: current.ok ? [] : current.problems,
   };
@@ -307,16 +268,10 @@ export type HarnessApplyResult = {
   written: boolean;
   /**
    * What the write removed from the sync repo clone, when it removed a
-   * harness or a path. Nothing is committed: the next `transport-begin`
-   * commits it with the declarations file.
+   * harness or a path: what `harness-stage` previewed. Nothing is committed:
+   * the next `transport-begin` commits it with the declarations file.
    */
-  removed?: {
-    repoFiles: string[];
-    /** The deleted overlay files, as paths in the sync repo. */
-    overlays: string[];
-    manifest: { generated: string[]; overlays: string[] };
-    canonicalVersionChanged: boolean;
-  };
+  removed?: RemovalReport;
 };
 
 function readStageFile(configDir: string): StageFileContent {
@@ -373,10 +328,7 @@ export function runHarnessApply(deps: InternalDeps): HarnessApplyResult {
   if (written) {
     // Planned from the file being replaced, before it is gone. An invalid one
     // gives no set to clean up from.
-    const before =
-      currentFile === null
-        ? { ok: true as const, harnesses: [] }
-        : parseHarnessDeclarations(currentFile.toString("utf8"));
+    const before = parseCurrentFile(currentFile);
     const after = parseHarnessDeclarations(staged.content!);
     if (before.ok && after.ok) {
       removal = removalBetween(deps.configDir, before.harnesses, after.harnesses);
@@ -393,15 +345,6 @@ export function runHarnessApply(deps: InternalDeps): HarnessApplyResult {
   return {
     path: HARNESS_DECLARATIONS_FILE,
     written,
-    ...(removal !== null
-      ? {
-          removed: {
-            repoFiles: removal.plan.repoFiles,
-            overlays: removal.plan.overlays.map((overlay) => overlay.path),
-            manifest: removal.plan.manifest,
-            canonicalVersionChanged: removal.plan.canonicalVersionChanges,
-          },
-        }
-      : {}),
+    ...(removal !== null ? { removed: removal.report } : {}),
   };
 }

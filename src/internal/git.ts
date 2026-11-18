@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { errorMessage } from "../utils/errors";
+import { InternalCommandError } from "./errors";
 
 const MAX_CAPTURE_BYTES = 10 * 1024 * 1024;
 export const NUL = String.fromCharCode(0);
@@ -65,4 +68,27 @@ export function git(dir: string, ...args: string[]): Promise<GitResult> {
       });
     });
   });
+}
+
+/** The refusal of every command that needs the sync repo clone. */
+export function requireClone(configDir: string): void {
+  if (!existsSync(join(configDir, ".git"))) {
+    throw new InternalCommandError(
+      "not-configured",
+      "No sync repository found. Run the setup subcommand first.",
+    );
+  }
+}
+
+/**
+ * Whether a path of the clone has anything for `git add -A` to record: it
+ * exists in the worktree, or git tracks it (so its deletion is staged).
+ */
+export async function isInWorktreeOrTracked(
+  configDir: string,
+  path: string,
+): Promise<boolean> {
+  if (existsSync(join(configDir, ...path.split("/")))) return true;
+  const tracked = await git(configDir, "ls-files", "--", path);
+  return tracked.ok && tracked.output.trim() !== "";
 }

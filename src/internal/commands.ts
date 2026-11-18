@@ -4,9 +4,12 @@ import { homedir } from "os";
 import pkg from "../../package.json" with { type: "json" };
 import {
   BUILT_IN_HARNESSES,
+  buildHarnessSet,
   harnessPaths,
   readHarnessSet,
+  type Harness,
 } from "../utils/harnessSet";
+import { HARNESS_ID_PATTERN } from "../utils/harnessDeclarations";
 import { snapshotSyncPath } from "../utils/agents";
 import { CONFIG_DIR, CONFIG_FILE, getLocalSyncPath, readConfig } from "../utils/config";
 import { readSyncManifest, type SyncManifest } from "../utils/manifest";
@@ -71,10 +74,12 @@ type SyncPathReport = {
 
 // The declaration shape, with one difference kept for existing readers:
 // `syncPaths` reports every path the harness transports, so it lists the
-// instructions file too, first.
+// instructions file too, first. `builtIn` tells the built-ins from the
+// declared harnesses.
 type HarnessReport = {
   id: string;
   name: string;
+  builtIn: boolean;
   instructionsFile?: string;
   syncPaths: SyncPathReport[];
 };
@@ -121,6 +126,20 @@ function generatedFileState(
   return "current";
 }
 
+// While the declarations file is invalid the custom harnesses are unknown.
+// The canonical version is then taken over the overlays the last sync unify
+// recorded, so the built-in generated files read as stale only when the
+// canonical content changed, not because the file broke. Those harnesses carry
+// no instructions file: nothing more is generated or reported for them.
+function lastUnifiedOverlays(manifest: SyncManifest | null): Harness[] {
+  const builtIn = new Set(BUILT_IN_HARNESSES.map(({ overlayId }) => overlayId));
+  return buildHarnessSet(
+    Object.keys(manifest?.canonical?.overlays ?? {})
+      .filter((id) => HARNESS_ID_PATTERN.test(id) && !builtIn.has(id))
+      .map((id) => ({ id, name: id, syncPaths: [] })),
+  );
+}
+
 function runStatus(deps: InternalDeps): StatusReport {
   const config = readConfig(deps.configFile);
   const clonePresent = existsSync(join(deps.configDir, ".git"));
@@ -140,7 +159,11 @@ function runStatus(deps: InternalDeps): StatusReport {
 
   // One gather pass feeds both the generated states and the drift summary,
   // so a single status report cannot disagree with itself.
-  const gathered = gatherDrift(deps.configDir, deps.homeDir, reported);
+  const gathered = gatherDrift(
+    deps.configDir,
+    deps.homeDir,
+    harnessSet.ok ? reported : lastUnifiedOverlays(manifest),
+  );
   const canonicalVersion = gathered.canonicalVersion;
 
   const generated = gathered.files.map((file): GeneratedFileReport => ({
@@ -159,6 +182,7 @@ function runStatus(deps: InternalDeps): StatusReport {
   const harnesses = reported.map((harness): HarnessReport => ({
     id: harness.id,
     name: harness.name,
+    builtIn: harness.builtIn,
     ...(harness.instructionsFile !== undefined
       ? { instructionsFile: harness.instructionsFile }
       : {}),

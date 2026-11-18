@@ -206,7 +206,7 @@ Symlinks and junctions at custom paths follow the existing mirroring rules exact
 
 - **Invalid means stop, for the whole file.** `transport-begin`, `transport-commit`, `gather`, `stage`, `apply` and `propagate` refuse with one typed error (`invalid-harness-declarations`) that lists each problem and its remedy. One bad declaration blocks syncing for the built-ins too; nothing is skipped, because skipping would make machines disagree about the harness set.
 - **`status` never fails.** It reports the built-ins as usual plus a caveat listing each problem and pointing at `/git-agents harness`.
-- **An invalid file produced by a merge** is carried by `transport-begin` as an entry in the existing `conflicts` list, and `transport-commit` refuses until it is fixed. The fix goes through `transport-resolve` with corrected full contents, validated on the way in, or the user aborts. The home directory and the remote are untouched either way.
+- **An invalid file produced by a merge** is carried by `transport-begin` as an entry in the existing `conflicts` list, and `transport-commit` refuses until it is fixed. The fix goes through `transport-resolve` with corrected full contents, validated on the way in, or the user aborts. The home directory and the remote are untouched either way. One exception: a clone with no commit of its own (cloned while the remote was empty) that fast-forwards onto an invalid remote file has no merge to reopen, so `transport-begin` refuses with `invalid-harness-declarations` instead.
 - An invalid declarations file never reads as "nothing declared".
 
 ### The first sync of a declaration ([#55](https://github.com/floklein/git-agents/issues/55))
@@ -255,7 +255,7 @@ The README shows the five built-in harnesses written in the declaration shape, a
 }
 ```
 
-The README states that these are built in and cannot be put in the declarations file.
+The README states that these are built in and cannot be put in the declarations file. In `status`, each entry of `harnesses[]` carries `builtIn` beside `instructionsFile`, and its `syncPaths` still lists the instructions file first, as older skills expect.
 
 ## The transport workflow: bare `sync` ([#26](https://github.com/floklein/git-agents/issues/26), [#27](https://github.com/floklein/git-agents/issues/27))
 

@@ -1,6 +1,11 @@
 import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { AGENT_DEFS, type AgentDef } from "./agentDefs";
+import {
+  AGENT_DEFS,
+  BUILT_IN_CONVERGENCE,
+  type AgentDef,
+} from "./agentDefs";
+import { isAtOrInside, pathKey } from "./pathKey";
 
 export const HARNESS_DECLARATIONS_FILE = ".git-agents-harnesses.json";
 
@@ -41,19 +46,22 @@ export type HarnessDeclarationsResult =
   | { ok: true; harnesses: CustomHarness[] }
   | { ok: false; problems: DeclarationProblem[] };
 
-const SUPPORTED_VERSION = 1;
+/** The one version of the file this git-agents reads and writes. */
+export const DECLARATIONS_VERSION = 1;
 const FILE_FIELDS = ["version", "harnesses"];
 const DECLARATION_FIELDS = ["name", "instructionsFile", "syncPaths"];
 
-const ID_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
+/** What a custom harness id may be. */
+export const HARNESS_ID_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
 // Each built-in answers to two ids: its transport id, in the built-in
 // definitions, and the id it uses for overlays, markers and manifest keys.
-const BUILT_IN_OVERLAY_IDS = ["claude", "codex", "gemini", "opencode", "cursor"];
+const BUILT_IN_OVERLAY_IDS: readonly string[] = BUILT_IN_CONVERGENCE.map(
+  ({ overlayId }) => overlayId,
+);
 const WINDOWS_DEVICE_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/;
 const WINDOWS_FORBIDDEN_CHARACTER = /[<>:"|?*\x00-\x1f]/;
 
-// Compared lowercased: the home directory is case-insensitive on Windows and
-// macOS, so `.SSH` is `.ssh` there.
+// Compared by `pathKey`, case-insensitively.
 const RESERVED_FIRST_SEGMENTS = [".git", ".git-agents", "canonical"];
 const CREDENTIAL_DENYLIST = [
   ".ssh",
@@ -67,15 +75,15 @@ const CREDENTIAL_DENYLIST = [
   ".config/git",
 ];
 
-type PathField = "instructionsFile" | "syncPaths";
+/** The field of a declaration that holds a path. */
+export type HarnessPathField = "instructionsFile" | "syncPaths";
 
 /** A path some harness already owns, for the one-owner rule. */
 type OwnedPath = {
   owner: string;
   builtIn: boolean;
-  field?: PathField;
+  field?: HarnessPathField;
   path: string;
-  lowered: string;
 };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -95,12 +103,7 @@ export function validateHarnessDeclarations(
   const problems: DeclarationProblem[] = [];
   const harnesses: CustomHarness[] = [];
   const owned: OwnedPath[] = builtIns.flatMap((builtIn) =>
-    builtIn.syncPaths.map((path) => ({
-      owner: builtIn.id,
-      builtIn: true,
-      path,
-      lowered: path.toLowerCase(),
-    })),
+    builtIn.syncPaths.map((path) => ({ owner: builtIn.id, builtIn: true, path })),
   );
 
   if (!isPlainObject(content)) {
@@ -116,14 +119,14 @@ export function validateHarnessDeclarations(
     problems.push({
       code: "unsupported-version",
       field: "version",
-      message: `"version" is missing; it must be ${SUPPORTED_VERSION}`,
+      message: `"version" is missing; it must be ${DECLARATIONS_VERSION}`,
     });
-  } else if (content.version !== SUPPORTED_VERSION) {
+  } else if (content.version !== DECLARATIONS_VERSION) {
     return invalid([
       {
         code: "unsupported-version",
         field: "version",
-        message: `"version" ${JSON.stringify(content.version)} is not supported; this git-agents understands only version ${SUPPORTED_VERSION}, so update git-agents or set it to ${SUPPORTED_VERSION}`,
+        message: `"version" ${JSON.stringify(content.version)} is not supported; this git-agents understands only version ${DECLARATIONS_VERSION}, so update git-agents or set it to ${DECLARATIONS_VERSION}`,
       },
     ]);
   }
@@ -186,6 +189,31 @@ export function parseHarnessDeclarations(
 }
 
 /**
+ * The raw declarations file at the root of the sync repo. A link or a
+ * directory at its place is never read through: it could lead outside the
+ * clone. Throws on a read error other than the file being absent.
+ */
+export type DeclarationsFile =
+  | { state: "absent" }
+  | { state: "not-regular" }
+  | { state: "present"; bytes: Buffer };
+
+export function readDeclarationsFile(configDir: string): DeclarationsFile {
+  const filePath = join(configDir, HARNESS_DECLARATIONS_FILE);
+  let stat;
+  try {
+    stat = lstatSync(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return { state: "absent" };
+    }
+    throw error;
+  }
+  if (stat.isSymbolicLink() || !stat.isFile()) return { state: "not-regular" };
+  return { state: "present", bytes: readFileSync(filePath) };
+}
+
+/**
  * Reads and validates the declarations file at the root of the sync repo.
  * An absent file declares nothing; any other failure is a problem, so an
  * invalid file never reads as "nothing declared". Never throws.
@@ -194,23 +222,10 @@ export function readHarnessDeclarations(
   configDir: string,
   builtIns: readonly AgentDef[] = AGENT_DEFS,
 ): HarnessDeclarationsResult {
-  const filePath = join(configDir, HARNESS_DECLARATIONS_FILE);
-  let text: string;
+  let file: DeclarationsFile;
   try {
-    const stat = lstatSync(filePath);
-    if (stat.isSymbolicLink() || !stat.isFile()) {
-      return invalid([
-        {
-          code: "unreadable",
-          message: `${HARNESS_DECLARATIONS_FILE} must be a regular file`,
-        },
-      ]);
-    }
-    text = readFileSync(filePath, "utf8");
+    file = readDeclarationsFile(configDir);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
-      return { ok: true, harnesses: [] };
-    }
     const detail = error instanceof Error ? error.message : String(error);
     return invalid([
       {
@@ -219,7 +234,16 @@ export function readHarnessDeclarations(
       },
     ]);
   }
-  return parseHarnessDeclarations(text, builtIns);
+  if (file.state === "absent") return { ok: true, harnesses: [] };
+  if (file.state === "not-regular") {
+    return invalid([
+      {
+        code: "unreadable",
+        message: `${HARNESS_DECLARATIONS_FILE} must be a regular file`,
+      },
+    ]);
+  }
+  return parseHarnessDeclarations(file.bytes.toString("utf8"), builtIns);
 }
 
 function invalid(problems: DeclarationProblem[]): HarnessDeclarationsResult {
@@ -231,7 +255,7 @@ function validateId(
   builtIns: readonly AgentDef[],
   problems: DeclarationProblem[],
 ): void {
-  if (!ID_PATTERN.test(id)) {
+  if (!HARNESS_ID_PATTERN.test(id)) {
     problems.push({
       code: "invalid-id",
       harness: id,
@@ -345,11 +369,7 @@ function validateDeclaration(
   return harness;
 }
 
-function isInside(path: string, parent: string): boolean {
-  return path.startsWith(`${parent}/`);
-}
-
-function describePath(id: string, field: PathField, path: string): string {
+function describePath(id: string, field: HarnessPathField, path: string): string {
   const label = field === "syncPaths" ? "syncPaths entry" : "instructionsFile";
   return `harness "${id}": ${label} ${JSON.stringify(path)}`;
 }
@@ -387,16 +407,16 @@ function portabilityFaults(path: string): string[] {
   return [...faults];
 }
 
-/** How `lowered` collides with a path already owned, or null when it does not. */
+/** How `path` collides with a path already owned, or null when it does not. */
 function describeOverlap(
   id: string,
-  lowered: string,
+  path: string,
   other: OwnedPath,
 ): string | null {
   let relation: string;
-  if (lowered === other.lowered) relation = "duplicates";
-  else if (isInside(lowered, other.lowered)) relation = "is inside";
-  else if (isInside(other.lowered, lowered)) relation = "contains";
+  if (pathKey(path) === pathKey(other.path)) relation = "duplicates";
+  else if (isAtOrInside(path, other.path)) relation = "is inside";
+  else if (isAtOrInside(other.path, path)) relation = "contains";
   else return null;
 
   let owner: string;
@@ -413,7 +433,7 @@ function describeOverlap(
  */
 function validatePath(
   id: string,
-  field: PathField,
+  field: HarnessPathField,
   path: string,
   owned: OwnedPath[],
   problems: DeclarationProblem[],
@@ -432,8 +452,7 @@ function validatePath(
     return;
   }
 
-  const lowered = path.toLowerCase();
-  const segments = lowered.split("/");
+  const segments = pathKey(path).split("/");
 
   if (segments.length < 2) {
     problems.push({
@@ -455,8 +474,8 @@ function validatePath(
     });
   }
 
-  const denied = CREDENTIAL_DENYLIST.find(
-    (location) => lowered === location || isInside(lowered, location),
+  const denied = CREDENTIAL_DENYLIST.find((location) =>
+    isAtOrInside(path, location),
   );
   if (denied !== undefined) {
     problems.push({
@@ -469,7 +488,7 @@ function validatePath(
   }
 
   const overlaps = owned
-    .map((other) => describeOverlap(id, lowered, other))
+    .map((other) => describeOverlap(id, path, other))
     .filter((overlap) => overlap !== null);
   if (overlaps.length > 0) {
     problems.push({
@@ -480,5 +499,5 @@ function validatePath(
       message: `${subject} ${overlaps.join(", ")}; a path has one owner, with no duplicate and no nesting`,
     });
   }
-  owned.push({ owner: id, builtIn: false, field, path, lowered });
+  owned.push({ owner: id, builtIn: false, field, path });
 }

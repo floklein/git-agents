@@ -218,6 +218,38 @@ describe("harness-stage", () => {
     expect(readdirSync(deps.configDir).sort()).toEqual(before);
   });
 
+  it("drops an earlier staged proposal when a later one is rejected", async () => {
+    const deps = makeDeps();
+    await stage(deps, { harnesses: { dsh: DSH } });
+
+    const rejected = await refusal(
+      "harness-stage",
+      { harnesses: { dsh: { syncPaths: [".ssh/keys"] } } },
+      deps,
+    );
+    const applied = await refusal("harness-apply", undefined, deps);
+
+    expect(rejected.code).toBe("invalid-harness-proposal");
+    expect(applied.code).toBe("no-harness-stage");
+    expect(existsSync(declarationsPath(deps))).toBe(false);
+  });
+
+  it("validates the input shape like the other commands, with the same code", async () => {
+    const deps = makeDeps();
+
+    for (const input of [undefined, null, [], "text", 3]) {
+      const error = await refusal("harness-stage", input, deps);
+      expect(error.code).toBe("invalid-input");
+      expect(error.message).toContain(
+        "harness-stage input does not match the expected shape",
+      );
+    }
+    // Any object reaches the validator, which names the problem itself.
+    const missing = await refusal("harness-stage", {}, deps);
+    expect(missing.code).toBe("invalid-harness-proposal");
+    expect(missing.message).toContain('"harnesses" must be an object');
+  });
+
   it("refuses a proposal that is not an object", async () => {
     const deps = makeDeps();
 
@@ -562,10 +594,17 @@ describe("harness-apply", () => {
       path: DECLARATIONS_FILE,
       written: true,
       removed: {
+        harnesses: [{ harness: "dsh", name: "DeepSeek Harness" }],
         repoFiles: [".dsh/AGENTS.md", ".dsh/skills/review/SKILL.md"],
-        overlays: ["canonical/overlays/dsh.md"],
+        overlays: [
+          {
+            harness: "dsh",
+            path: "canonical/overlays/dsh.md",
+            content: "# DSH only\n",
+          },
+        ],
         manifest: { generated: ["dsh"], overlays: ["dsh"] },
-        canonicalVersionChanged: true,
+        canonicalVersionChanges: true,
       },
     });
     expect(readFileSync(declarationsPath(deps), "utf8")).toBe(

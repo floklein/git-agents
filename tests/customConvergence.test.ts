@@ -618,6 +618,45 @@ describe("status with custom harnesses", () => {
     ]);
     expect(status.caveats[0]!.code).toBe("invalid-harness-declarations");
   });
+
+  it("does not read the built-in generated files as stale because the declarations file broke", async () => {
+    const deps = makeDeps();
+    seedCanonical(deps.configDir, "# Core\n", {
+      claude: "# Claude\n",
+      dsh: "# DSH\n",
+    });
+    declare(deps.configDir, { dsh: { instructionsFile: ".dsh/AGENTS.md" } });
+    const { canonicalVersion } = propagateCanonical(deps.configDir, deps.homeDir);
+    declare(deps.configDir, {
+      dsh: { instructionsFile: ".dsh/AGENTS.md", color: "blue" },
+    });
+
+    const status = await statusOf(deps);
+
+    expect(status.caveats[0]!.code).toBe("invalid-harness-declarations");
+    expect(status.canonicalVersion).toBe(canonicalVersion);
+    expect(status.generated.map((file) => file.state)).toEqual([
+      "current",
+      "current",
+      "current",
+      "current",
+    ]);
+  });
+
+  it("still reads the built-in generated files as stale when the canonical changed", async () => {
+    const deps = makeDeps();
+    seedCanonical(deps.configDir, "# Core\n", { dsh: "# DSH\n" });
+    declare(deps.configDir, { dsh: { instructionsFile: ".dsh/AGENTS.md" } });
+    propagateCanonical(deps.configDir, deps.homeDir);
+    declare(deps.configDir, {
+      dsh: { instructionsFile: ".dsh/AGENTS.md", color: "blue" },
+    });
+    seedCanonical(deps.configDir, "# Core v2\n", { dsh: "# DSH\n" });
+
+    const status = await statusOf(deps);
+
+    expect(status.generated[0]!.state).toBe("stale");
+  });
 });
 
 describe("an invalid declarations file", () => {

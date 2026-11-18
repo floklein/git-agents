@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { snapshotSyncPath } from "../utils/agents";
 import { getLocalSyncPath } from "../utils/config";
+import { pathKey } from "../utils/pathKey";
 
 // What the home directory held after this machine's last completed sync.
 // Deletion detection needs exactly this per-machine memory: the home dir
@@ -54,9 +55,7 @@ export function forgetLastSyncedPaths(
   syncPaths: readonly string[],
 ): void {
   const recorded = readLastSyncedPaths(configDir);
-  const forgotten = new Set(syncPaths.map((path) => path.toLowerCase()));
-  const kept = [...recorded].filter(
-    (path) => !forgotten.has(path.toLowerCase()),
-  );
+  const forgotten = new Set(syncPaths.map(pathKey));
+  const kept = [...recorded].filter((path) => !forgotten.has(pathKey(path)));
   if (kept.length !== recorded.size) writeRecord(configDir, kept);
 }

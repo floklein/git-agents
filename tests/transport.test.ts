@@ -967,6 +967,36 @@ describe("transport with custom harnesses", () => {
     expect(later.firstSync).toEqual([]);
   }, 60000);
 
+  it("sizes an incoming first-time path the remote declares in another case, in the conflicts state", async () => {
+    const { a, b } = await twoMachines();
+    writeDeclarations(a, { version: 1, harnesses: { zed: { syncPaths: [".zed/prompts"] } } });
+    writeHome(a, ".zed/prompts/a.md", "zed prompt\n");
+    await fullSync(a);
+    // B declares the same path in another case, so the two files conflict.
+    writeDeclarations(b, {
+      version: 1,
+      harnesses: { zed: { name: "Zed", syncPaths: [".Zed/prompts"] } },
+    });
+
+    const begin = await runTransportBegin(b);
+
+    expect(begin.state).toBe("conflicts");
+    if (begin.state !== "conflicts") return;
+    expect(begin.conflicts.map((conflict) => conflict.path)).toEqual([
+      DECLARATIONS_FILE,
+    ]);
+    expect(begin.firstSync).toEqual([
+      {
+        harness: "zed",
+        name: "Zed",
+        path: ".Zed/prompts",
+        direction: "incoming",
+        fileCount: 1,
+        totalBytes: 11,
+      },
+    ]);
+  }, 60000);
+
   it("lists declared paths as first-time on a machine that joins the repo", async () => {
     const bare = makeBare();
     const a = makeMachine(bare);

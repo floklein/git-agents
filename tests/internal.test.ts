@@ -205,6 +205,31 @@ describe("runInternalCommand", () => {
     expect(status.caveats).toEqual([]);
   });
 
+  it("status tells built-in harnesses from custom ones", async () => {
+    const deps = makeDeps();
+    writeFileSync(
+      join(deps.configDir, ".git-agents-harnesses.json"),
+      JSON.stringify({
+        version: 1,
+        harnesses: { dsh: { instructionsFile: ".dsh/AGENTS.md" } },
+      }),
+      "utf8",
+    );
+
+    const status = await statusResult(deps);
+
+    expect(
+      status.harnesses.map((harness) => [harness.id, harness.builtIn]),
+    ).toEqual([
+      ["claude-code", true],
+      ["codex", true],
+      ["cursor", true],
+      ["gemini-cli", true],
+      ["opencode", true],
+      ["dsh", false],
+    ]);
+  });
+
   it("status succeeds on an invalid declarations file: built-ins plus a caveat", async () => {
     const deps = makeDeps();
     const file = join(deps.configDir, ".git-agents-harnesses.json");

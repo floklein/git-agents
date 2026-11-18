@@ -11,14 +11,14 @@ const DSH = {
 const GOOSE = { id: "goose", name: "goose", syncPaths: [".config/goose/recipes"] };
 
 describe("declared paths", () => {
-  it("lists every transported path with the harness that declares it", () => {
+  it("lists every transported path with the harness and the field that declare it", () => {
     const custom = declaredPaths(buildHarnessSet([DSH])).filter(
       ({ harness }) => harness === "dsh",
     );
 
     expect(custom).toEqual([
-      { harness: "dsh", name: "DeepSeek Harness", path: ".dsh/AGENTS.md" },
-      { harness: "dsh", name: "DeepSeek Harness", path: ".dsh/skills" },
+      { harness: "dsh", name: "DeepSeek Harness", field: "instructionsFile", path: ".dsh/AGENTS.md" },
+      { harness: "dsh", name: "DeepSeek Harness", field: "syncPaths", path: ".dsh/skills" },
     ]);
   });
 
@@ -31,13 +31,13 @@ describe("declared paths", () => {
 
     // Newly declared by the remote.
     expect(pathsOnlyIn(remote, base)).toEqual([
-      { harness: "dsh", name: "DeepSeek Harness", path: ".dsh/commands" },
-      { harness: "goose", name: "goose", path: ".config/goose/recipes" },
+      { harness: "dsh", name: "DeepSeek Harness", field: "syncPaths", path: ".dsh/commands" },
+      { harness: "goose", name: "goose", field: "syncPaths", path: ".config/goose/recipes" },
     ]);
     // Removed by the remote.
     expect(pathsOnlyIn(base, BUILT_IN_HARNESSES)).toEqual([
-      { harness: "dsh", name: "DeepSeek Harness", path: ".dsh/AGENTS.md" },
-      { harness: "dsh", name: "DeepSeek Harness", path: ".dsh/skills" },
+      { harness: "dsh", name: "DeepSeek Harness", field: "instructionsFile", path: ".dsh/AGENTS.md" },
+      { harness: "dsh", name: "DeepSeek Harness", field: "syncPaths", path: ".dsh/skills" },
     ]);
     expect(pathsOnlyIn(base, remote)).toEqual([]);
   });

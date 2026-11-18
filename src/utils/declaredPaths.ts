@@ -1,38 +1,43 @@
-import { harnessPaths, type Harness } from "./harnessSet";
+import type { HarnessPathField } from "./harnessDeclarations";
+import type { Harness } from "./harnessSet";
+import { pathKey } from "./pathKey";
 
-/** One transported path and the harness that declares it. */
-export type DeclaredPath = {
+/**
+ * One transported path, with the harness that declares it (id and name) and
+ * the field of the declaration that holds it. Results report the parts they
+ * need: the gate names the harness, `harness-stage` gives the field.
+ */
+export type HarnessPath = {
   /** The harness id. */
   harness: string;
   name: string;
+  field: HarnessPathField;
   path: string;
 };
 
-// One owner per path is judged case-insensitively, so identity is too.
-function pathKey(path: string): string {
-  return path.toLowerCase();
-}
-
-/** Every path a harness set transports, in set order. */
-export function declaredPaths(set: readonly Harness[]): DeclaredPath[] {
-  return set.flatMap((harness) =>
-    harnessPaths(harness).map((path) => ({
-      harness: harness.id,
-      name: harness.name,
-      path,
-    })),
-  );
+/** Every path a harness set transports, in set order, instructions file first. */
+export function declaredPaths(set: readonly Harness[]): HarnessPath[] {
+  return set.flatMap((harness): HarnessPath[] => {
+    const owner = { harness: harness.id, name: harness.name };
+    return [
+      ...(harness.instructionsFile !== undefined
+        ? [{ ...owner, field: "instructionsFile" as const, path: harness.instructionsFile }]
+        : []),
+      ...harness.syncPaths.map((path) => ({ ...owner, field: "syncPaths" as const, path })),
+    ];
+  });
 }
 
 /**
- * The paths `set` declares and `other` does not. With the remote's set and the
- * merge base's, these are the paths the remote newly declares; with the
- * arguments swapped, the paths it removed.
+ * The paths `set` declares and `other` does not, whoever declares them. With
+ * the remote's set and the merge base's, these are the paths the remote newly
+ * declares; with the arguments swapped, the paths it removed. A path that
+ * moves to another harness or field is in neither direction.
  */
 export function pathsOnlyIn(
   set: readonly Harness[],
   other: readonly Harness[],
-): DeclaredPath[] {
+): HarnessPath[] {
   const known = new Set(declaredPaths(other).map(({ path }) => pathKey(path)));
   return declaredPaths(set).filter(({ path }) => !known.has(pathKey(path)));
 }
@@ -48,4 +53,13 @@ export function uniquePaths<T extends { path: string }>(
     seen.add(key);
     return true;
   });
+}
+
+/** A path as the gate lists it: the harness by id and name. */
+export function namedPath({
+  harness,
+  name,
+  path,
+}: HarnessPath): Omit<HarnessPath, "field"> {
+  return { harness, name, path };
 }

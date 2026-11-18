@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { BUILT_IN_CONVERGENCE } from "../utils/agentDefs";
 import { getLocalSyncPath } from "../utils/config";
 import { requireHarnessSet, type Harness } from "../utils/harnessSet";
 import {
@@ -14,20 +15,14 @@ export const CANONICAL_DIR = "canonical";
 export const CANONICAL_CORE = "core.md";
 export const CANONICAL_OVERLAYS_DIR = "overlays";
 
+/** The overlay id of a built-in harness. */
 export type CanonicalHarness =
-  | "claude"
-  | "codex"
-  | "gemini"
-  | "opencode"
-  | "cursor";
+  (typeof BUILT_IN_CONVERGENCE)[number]["overlayId"];
 
-export const CANONICAL_HARNESSES: CanonicalHarness[] = [
-  "claude",
-  "codex",
-  "gemini",
-  "opencode",
-  "cursor",
-];
+/** The built-in overlay ids, in canonical order. */
+export const CANONICAL_HARNESSES: CanonicalHarness[] = BUILT_IN_CONVERGENCE.map(
+  ({ overlayId }) => overlayId,
+);
 
 /** A generated file: `harness` is the overlay id, built-in or custom. */
 export type GeneratedTarget = {
@@ -35,15 +30,14 @@ export type GeneratedTarget = {
   syncPath: string;
 };
 
-// Cursor has no global instructions file, so it receives no generated copy;
-// its overlay is read only through the opt-in pointer rule.
 // The built-in targets alone; `generatedTargets` gives those of a harness set.
-export const GENERATED_TARGETS: GeneratedTarget[] = [
-  { harness: "claude", syncPath: ".claude/CLAUDE.md" },
-  { harness: "codex", syncPath: ".codex/AGENTS.md" },
-  { harness: "gemini", syncPath: ".gemini/GEMINI.md" },
-  { harness: "opencode", syncPath: ".config/opencode/AGENTS.md" },
-];
+// Cursor has no instructions file, so no generated copy.
+export const GENERATED_TARGETS: GeneratedTarget[] = BUILT_IN_CONVERGENCE.flatMap(
+  (builtIn): GeneratedTarget[] =>
+    "instructionsFile" in builtIn
+      ? [{ harness: builtIn.overlayId, syncPath: builtIn.instructionsFile }]
+      : [],
+);
 
 /** Overlay contents keyed by overlay id, built-in or custom. */
 export type CanonicalOverlays = Record<string, string | undefined>;

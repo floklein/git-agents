@@ -17,8 +17,9 @@ import { getRemoteSyncPath } from "../utils/config";
 import {
   declaredPaths,
   pathsOnlyIn,
-  type DeclaredPath,
+  type HarnessPath,
 } from "../utils/declaredPaths";
+import { isAtOrInside } from "../utils/pathKey";
 import type { Harness } from "../utils/harnessSet";
 import {
   SYNC_MANIFEST_FILE,
@@ -50,7 +51,7 @@ export type RemovalPlan = {
   /** Harnesses that are no longer declared at all. */
   harnesses: RemovedHarness[];
   /** Paths no harness declares any more, whichever harness declared them. */
-  paths: DeclaredPath[];
+  paths: HarnessPath[];
   /** The mirrored files to delete, as paths in the sync repo. */
   repoFiles: string[];
   /** The overlays of the removed harnesses, with the content that goes. */
@@ -99,13 +100,6 @@ function repoFilesAt(configDir: string, syncPath: string): string[] {
   return files;
 }
 
-// Whether a repo file is at or inside one of the paths, compared the way
-// ownership is.
-function isCovered(repoFile: string, paths: readonly string[]): boolean {
-  const file = repoFile.toLowerCase();
-  return paths.some((path) => file === path || file.startsWith(`${path}/`));
-}
-
 // The manifest is bookkeeping: one that cannot be read has no entry to delete.
 function readManifest(configDir: string): SyncManifest | null {
   try {
@@ -138,12 +132,10 @@ export function planRemoval(
 
   // A file a remaining declaration covers stays, as when a declared directory
   // is narrowed to one of its subdirectories.
-  const stillDeclared = declaredPaths(after).map(({ path }) =>
-    path.toLowerCase(),
-  );
+  const stillDeclared = declaredPaths(after).map(({ path }) => path);
   const repoFiles = paths
     .flatMap(({ path }) => repoFilesAt(configDir, path))
-    .filter((file) => !isCovered(file, stillDeclared));
+    .filter((file) => !stillDeclared.some((path) => isAtOrInside(file, path)));
 
   const overlays = harnesses.flatMap(({ harness }): RemovedOverlay[] => {
     try {

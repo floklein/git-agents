@@ -21,6 +21,7 @@ import {
   requireHarnessSet,
 } from "../utils/harnessSet";
 import { declaredPaths, pathsOnlyIn, uniquePaths } from "../utils/declaredPaths";
+import { byCodeUnit, isAtOrInside, pathKey } from "../utils/pathKey";
 import { getLocalSyncPath, getRemoteSyncPath } from "../utils/config";
 import {
   compareSyncPathSnapshots,
@@ -28,7 +29,7 @@ import {
   snapshotSyncPath,
 } from "../utils/agents";
 import { InternalCommandError, invalidInputError } from "./errors";
-import { NUL, git } from "./git";
+import { NUL, git, isInWorktreeOrTracked, requireClone } from "./git";
 import {
   LAST_SYNC_FILE,
   forgetLastSyncedPaths,
@@ -41,8 +42,8 @@ import {
   firstSyncListing,
   invalidDeclarationsConflict,
   invalidMergedDeclarationsError,
-  lookAtDeclarations,
   mergedDeclarationProblems,
+  readBaseAndRemoteSets,
   remoteDeclarationChanges,
   removedListing,
   resolveDeclarations,
@@ -67,14 +68,6 @@ function commitScope(syncPaths: string[]): string[] {
 }
 
 const TRANSPORT_STATE_FILE = ".git-agents-transport.json";
-function requireClone(deps: InternalDeps): void {
-  if (!existsSync(join(deps.configDir, ".git"))) {
-    throw new InternalCommandError(
-      "not-configured",
-      "No sync repository found. Run the setup subcommand first.",
-    );
-  }
-}
 
 function mergeInProgress(configDir: string): boolean {
   return existsSync(join(configDir, ".git", "MERGE_HEAD"));
@@ -238,9 +231,7 @@ async function stageScope(
   syncPaths: string[],
 ): Promise<void> {
   for (const scopePath of commitScope(syncPaths)) {
-    const inWorktree = existsSync(join(configDir, ...scopePath.split("/")));
-    const tracked = await git(configDir, "ls-files", "--", scopePath);
-    if (!inWorktree && !(tracked.ok && tracked.output.trim())) continue;
+    if (!(await isInWorktreeOrTracked(configDir, scopePath))) continue;
     const added = await git(configDir, "add", "-A", "--", scopePath);
     if (!added.ok) {
       throw new InternalCommandError(
@@ -325,7 +316,7 @@ async function conflictFiles(configDir: string): Promise<ConflictFile[]> {
   if (problems !== null) {
     conflicts.push(await invalidDeclarationsConflict(configDir, problems));
   }
-  return conflicts.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return conflicts.sort((a, b) => byCodeUnit(a.path, b.path));
 }
 
 // A merge git completed although its declarations file is invalid is taken
@@ -368,7 +359,9 @@ export type TransportBeginResult =
       removed?: RemovedDeclarations;
     };
 
-function removedField(removed: RemovedDeclarations | undefined): {
+// The optional `removed` field of a begin result, present only when there
+// is something to name.
+function removedIfAny(removed: RemovedDeclarations | undefined): {
   removed?: RemovedDeclarations;
 } {
   return removed === undefined ? {} : { removed };
@@ -377,7 +370,7 @@ function removedField(removed: RemovedDeclarations | undefined): {
 export async function runTransportBegin(
   deps: InternalDeps,
 ): Promise<TransportBeginResult> {
-  requireClone(deps);
+  requireClone(deps.configDir);
   if (mergeInProgress(deps.configDir)) {
     throw new InternalCommandError(
       "transport-in-progress",
@@ -418,16 +411,14 @@ export async function runTransportBegin(
   // Look before mirroring: a path the remote newly declares is mirrored in
   // this run, not the next one.
   const remoteTip = await fetchRemoteTip(deps.configDir);
-  const look = await lookAtDeclarations(deps.configDir, remoteTip);
-  const changes = remoteDeclarationChanges(look);
+  const baseAndRemote = await readBaseAndRemoteSets(deps.configDir, remoteTip);
+  const changes = remoteDeclarationChanges(baseAndRemote);
   // And a path the remote removed is not mirrored at all: its files stay in
   // the home directory, unsynced, and never meet the remote's deletion.
-  const unmanaged = new Set(
-    changes.removed.map(({ path }) => path.toLowerCase()),
-  );
+  const unmanaged = new Set(changes.removed.map(({ path }) => pathKey(path)));
   const syncPaths = uniquePaths([...declaredPaths(local), ...changes.declared])
     .map(({ path }) => path)
-    .filter((path) => !unmanaged.has(path.toLowerCase()));
+    .filter((path) => !unmanaged.has(pathKey(path)));
   // Their repo copies are about to go. Should the merge keep one of them
   // declared after all, that must not read as a deletion to carry home.
   forgetLastSyncedPaths(
@@ -435,10 +426,10 @@ export async function runTransportBegin(
     changes.removed.map(({ path }) => path),
   );
 
-  // What this machine has synced before, for the gate listing: on a machine
-  // that never completed a sync, every custom path is a first sync.
-  const known = existsSync(join(deps.configDir, LAST_SYNC_FILE))
-    ? look.base
+  // The harness set this machine has synced before, for the gate listing: on
+  // a machine that never completed a sync, every custom path is a first sync.
+  const syncedBefore = existsSync(join(deps.configDir, LAST_SYNC_FILE))
+    ? baseAndRemote.base
     : [...BUILT_IN_HARNESSES];
 
   const outgoing = mirrorChanged(deps, "outgoing", syncPaths);
@@ -477,20 +468,25 @@ export async function runTransportBegin(
     // side newly declares, and sizes the incoming side as the remote holds it.
     const incoming = await mergedPaths(deps.configDir);
     const declared = uniquePaths([
-      ...pathsOnlyIn(local, known),
-      ...(look.remote === null ? [] : pathsOnlyIn(look.remote, known)),
+      ...pathsOnlyIn(local, syncedBefore),
+      ...(baseAndRemote.remote === null
+        ? []
+        : pathsOnlyIn(baseAndRemote.remote, syncedBefore)),
     ]);
     return {
       state: "conflicts",
       outgoing,
       incoming,
       conflicts,
-      firstSync: await firstSyncListing(declared, outgoingSize, (path) =>
-        incoming.some((file) => file === path || file.startsWith(`${path}/`))
-          ? sizeAt(deps.configDir, "MERGE_HEAD", path)
-          : null,
-      ),
-      ...removedField(removedListing(look, null, deps.homeDir)),
+      firstSync: await firstSyncListing(declared, outgoingSize, (path) => {
+        // The remote may spell the path in another case: git reads its tree
+        // under the remote's spelling.
+        const file = incoming.find((file) => isAtOrInside(file, path));
+        return file === undefined
+          ? null
+          : sizeAt(deps.configDir, "MERGE_HEAD", file.slice(0, path.length));
+      }),
+      ...removedIfAny(removedListing(baseAndRemote, null, deps.homeDir)),
     };
   };
 
@@ -547,13 +543,13 @@ export async function runTransportBegin(
     outgoing,
     incoming,
     firstSync: await firstSyncListing(
-      pathsOnlyIn(mergedSet, known),
+      pathsOnlyIn(mergedSet, syncedBefore),
       outgoingSize,
       changedPathSize(incoming, (path) =>
         getRemoteSyncPath(path, deps.configDir),
       ),
     ),
-    ...removedField(removedListing(look, mergedSet, deps.homeDir)),
+    ...removedIfAny(removedListing(baseAndRemote, mergedSet, deps.homeDir)),
   };
 }
 
@@ -580,7 +576,7 @@ export async function runTransportResolve(
   deps: InternalDeps,
   rawInput: unknown,
 ): Promise<TransportResolveResult> {
-  requireClone(deps);
+  requireClone(deps.configDir);
   if (!mergeInProgress(deps.configDir)) {
     throw new InternalCommandError(
       "no-transport",
@@ -656,7 +652,7 @@ export async function runTransportCommit(
   deps: InternalDeps,
   rawInput: unknown,
 ): Promise<TransportCommitResult> {
-  requireClone(deps);
+  requireClone(deps.configDir);
   const parsed = CommitInputSchema.safeParse(rawInput);
   if (!parsed.success) throw invalidInputError("transport-commit", parsed.error);
   const deferPush = parsed.data?.deferPush === true;
@@ -739,7 +735,7 @@ export type TransportAbortResult = { aborted: boolean; message: string };
 export async function runTransportAbort(
   deps: InternalDeps,
 ): Promise<TransportAbortResult> {
-  requireClone(deps);
+  requireClone(deps.configDir);
   const state = readTransportState(deps.configDir);
   const merging = mergeInProgress(deps.configDir);
 

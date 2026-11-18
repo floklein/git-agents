@@ -6,7 +6,7 @@ Every write goes through the gate rule (SKILL.md, "The gate").
 
 ## 1. Read the current set
 
-Run `status`. Its `harnesses[]` lists the built-ins (`claude-code`, `codex`, `cursor`, `gemini-cli`, `opencode`) first, then the custom harnesses sorted by id, each as `{id, name, instructionsFile?, syncPaths}`. Its `syncPaths` reports every path the harness transports, the instructions file first; a declaration does not repeat the instructions file in `syncPaths`.
+Run `status`. Its `harnesses[]` lists the built-ins first, then the custom harnesses sorted by id, each as `{id, name, builtIn, instructionsFile?, syncPaths}`; `builtIn` is true for a built-in and false for a custom harness, so tell them apart by it, never by id. Its `syncPaths` reports every path the harness transports, the instructions file first; a declaration does not repeat the instructions file in `syncPaths`.
 
 If `caveats` holds `invalid-harness-declarations`, the file is invalid: `status` reports the built-ins alone, every sync is blocked, and the caveat lists each problem. The proposal you stage replaces the whole file, so this flow is the repair route. Read the file at the caveat's `path` to recover what was meant, and redraft it.
 
@@ -14,7 +14,7 @@ With no request text, list the built-in and custom harnesses (name, id, instruct
 
 ## 2. Draft the complete set
 
-`harness-stage` takes the complete proposed set of custom harnesses, `{"harnesses": {"<id>": {...}}}`, never a delta: every declaration that stays, with the change folded in. A declaration left out is removed; `{"harnesses": {}}` removes them all. The script writes `version`. The built-ins never appear in the set.
+`harness-stage` takes the complete proposed set of custom harnesses, `{"harnesses": {"<id>": {...}}}`, never a delta: every declaration that stays, with the change folded in. A declaration left out is removed; `{"harnesses": {}}` removes them all. The script writes `version`. The built-ins (`builtIn: true`) never appear in the set.
 
 Each declaration has these fields, and no others:
 

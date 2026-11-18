@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   HARNESS_DECLARATIONS_FILE,
@@ -17,9 +17,11 @@ import {
 import { getLocalSyncPath } from "../utils/config";
 import {
   declaredPaths,
+  namedPath,
   pathsOnlyIn,
-  type DeclaredPath,
+  type HarnessPath,
 } from "../utils/declaredPaths";
+import { pathKey } from "../utils/pathKey";
 import { measureSyncPath, type SyncPathSize } from "../utils/pathSize";
 import {
   applyRemoval,
@@ -27,7 +29,7 @@ import {
   type RemovedHarness,
 } from "./declarationRemoval";
 import { InternalCommandError } from "./errors";
-import { NUL, git, type GitResult } from "./git";
+import { NUL, git, isInWorktreeOrTracked, type GitResult } from "./git";
 import type { ConflictFile } from "./transport";
 
 // What transport does about the declarations file: committing a pending
@@ -46,9 +48,7 @@ export async function commitPendingDeclarations(
   configDir: string,
 ): Promise<string | null> {
   const file = HARNESS_DECLARATIONS_FILE;
-  const inWorktree = existsSync(join(configDir, file));
-  const tracked = await git(configDir, "ls-files", "--", file);
-  if (!inWorktree && !(tracked.ok && tracked.output.trim())) return null;
+  if (!(await isInWorktreeOrTracked(configDir, file))) return null;
 
   const added = await git(configDir, "add", "-A", "--", file);
   const staged = added.ok
@@ -97,9 +97,7 @@ async function cleanUpAfterRemoval(configDir: string): Promise<string[]> {
 
   const paths: string[] = [];
   for (const path of plan.scope) {
-    const inWorktree = existsSync(join(configDir, ...path.split("/")));
-    const tracked = await git(configDir, "ls-files", "--", path);
-    if (!inWorktree && !(tracked.ok && tracked.output.trim())) continue;
+    if (!(await isInWorktreeOrTracked(configDir, path))) continue;
     const added = await git(configDir, "add", "-A", "--", path);
     if (!added.ok) {
       throw new InternalCommandError(
@@ -165,8 +163,9 @@ async function harnessSetAt(
   return declared.ok ? buildHarnessSet(declared.harnesses) : null;
 }
 
-// What the fetch shows of the declarations, before anything is mirrored.
-export type DeclarationsLook = {
+// The harness sets on either side of the coming merge, as the fetch shows
+// them before anything is mirrored.
+export type BaseAndRemoteSets = {
   // The set both sides started from. Without a merge base, or with an invalid
   // file there, nothing custom counts as already declared.
   base: Harness[];
@@ -175,10 +174,10 @@ export type DeclarationsLook = {
   remote: Harness[] | null;
 };
 
-export async function lookAtDeclarations(
+export async function readBaseAndRemoteSets(
   configDir: string,
   remoteTip: string | null,
-): Promise<DeclarationsLook> {
+): Promise<BaseAndRemoteSets> {
   if (remoteTip === null) return { base: [...BUILT_IN_HARNESSES], remote: null };
   const mergeBase = await git(configDir, "merge-base", "HEAD", remoteTip);
   const base = mergeBase.ok
@@ -194,28 +193,28 @@ type RemoteDeclarationChanges = {
   // Paths the remote declares and the merge base does not. They join the
   // mirror set, so a file this machine already holds there is committed first
   // and meets the remote's as a both-added conflict.
-  declared: DeclaredPath[];
+  declared: HarnessPath[];
   // Paths the merge base declares and the remote does not: another machine
   // removed them, and its cleanup deleted their repo copies. They leave the
   // mirror set, so this machine's edits to those files are never committed
   // and cannot meet that deletion as a conflict.
-  removed: DeclaredPath[];
+  removed: HarnessPath[];
 };
 
 // The remote's declarations against the merge base's. The base is the
 // reference, not this machine's file, so a path this machine removed and the
 // remote still declares is not taken for a new one.
 export function remoteDeclarationChanges(
-  look: DeclarationsLook,
+  sets: BaseAndRemoteSets,
 ): RemoteDeclarationChanges {
-  if (look.remote === null) return { declared: [], removed: [] };
+  if (sets.remote === null) return { declared: [], removed: [] };
   return {
-    declared: pathsOnlyIn(look.remote, look.base),
-    removed: pathsOnlyIn(look.base, look.remote),
+    declared: pathsOnlyIn(sets.remote, sets.base),
+    removed: pathsOnlyIn(sets.base, sets.remote),
   };
 }
 
-export type RemovedPath = DeclaredPath & {
+export type RemovedPath = Omit<HarnessPath, "field"> & {
   /** Whether this machine's home directory holds something there. */
   present: boolean;
 };
@@ -232,27 +231,27 @@ export type RemovedDeclarations = {
 // set declares all the same is not listed: it is still synced. Undefined when
 // there is nothing to name.
 export function removedListing(
-  look: DeclarationsLook,
+  sets: BaseAndRemoteSets,
   merged: readonly Harness[] | null,
   homeDir: string,
 ): RemovedDeclarations | undefined {
-  if (look.remote === null) return undefined;
-  const remaining = [look.remote, ...(merged === null ? [] : [merged])];
+  if (sets.remote === null) return undefined;
+  const remaining = [sets.remote, ...(merged === null ? [] : [merged])];
   const ids = new Set(remaining.flat().map((harness) => harness.id));
   const kept = new Set(
     (merged === null ? [] : declaredPaths(merged)).map(({ path }) =>
-      path.toLowerCase(),
+      pathKey(path),
     ),
   );
 
-  const harnesses = look.base
+  const harnesses = sets.base
     .filter((harness) => !ids.has(harness.id))
     .map(({ id, name }): RemovedHarness => ({ harness: id, name }));
-  const paths = pathsOnlyIn(look.base, look.remote)
-    .filter(({ path }) => !kept.has(path.toLowerCase()))
+  const paths = pathsOnlyIn(sets.base, sets.remote)
+    .filter(({ path }) => !kept.has(pathKey(path)))
     .map(
       (entry): RemovedPath => ({
-        ...entry,
+        ...namedPath(entry),
         present: measureSyncPath(getLocalSyncPath(entry.path, homeDir)) !== null,
       }),
     );
@@ -261,7 +260,7 @@ export function removedListing(
     : { harnesses, paths };
 }
 
-export type FirstSyncPath = DeclaredPath &
+export type FirstSyncPath = Omit<HarnessPath, "field"> &
   SyncPathSize & { direction: "outgoing" | "incoming" };
 
 type SizeOf = (path: string) => SyncPathSize | null | Promise<SyncPathSize | null>;
@@ -269,7 +268,7 @@ type SizeOf = (path: string) => SyncPathSize | null | Promise<SyncPathSize | nul
 // The gate listing: each newly declared path, once per direction in which it
 // has something to sync.
 export async function firstSyncListing(
-  declared: DeclaredPath[],
+  declared: HarnessPath[],
   outgoingSize: SizeOf,
   incomingSize: SizeOf,
 ): Promise<FirstSyncPath[]> {
@@ -277,11 +276,11 @@ export async function firstSyncListing(
   for (const entry of declared) {
     const outgoing = await outgoingSize(entry.path);
     if (outgoing !== null) {
-      listing.push({ ...entry, direction: "outgoing", ...outgoing });
+      listing.push({ ...namedPath(entry), direction: "outgoing", ...outgoing });
     }
     const incoming = await incomingSize(entry.path);
     if (incoming !== null) {
-      listing.push({ ...entry, direction: "incoming", ...incoming });
+      listing.push({ ...namedPath(entry), direction: "incoming", ...incoming });
     }
   }
   return listing;
