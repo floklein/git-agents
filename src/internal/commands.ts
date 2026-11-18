@@ -2,7 +2,11 @@ import { existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import pkg from "../../package.json" with { type: "json" };
-import { AGENT_DEFS } from "../utils/agentDefs";
+import {
+  BUILT_IN_HARNESSES,
+  harnessPaths,
+  readHarnessSet,
+} from "../utils/harnessSet";
 import { snapshotSyncPath } from "../utils/agents";
 import { CONFIG_DIR, CONFIG_FILE, getLocalSyncPath, readConfig } from "../utils/config";
 import { readSyncManifest, type SyncManifest } from "../utils/manifest";
@@ -22,7 +26,11 @@ import {
 } from "./transport";
 import { defaultSetupFlowDeps, runSetup, type SetupFlowDeps } from "./setup";
 import { runVersionCheck } from "./versionCheck";
-import { detectCaveats, type Caveat } from "./caveats";
+import {
+  detectCaveats,
+  invalidDeclarationsCaveat,
+  type Caveat,
+} from "./caveats";
 import { InternalCommandError } from "./errors";
 import type { SyncPathSnapshot } from "../types";
 
@@ -60,9 +68,13 @@ type SyncPathReport = {
   contentHash?: string;
 };
 
+// The declaration shape, with one difference kept for existing readers:
+// `syncPaths` reports every path the harness transports, so it lists the
+// instructions file too, first.
 type HarnessReport = {
   id: string;
   name: string;
+  instructionsFile?: string;
   syncPaths: SyncPathReport[];
 };
 
@@ -138,10 +150,18 @@ function runStatus(deps: InternalDeps): StatusReport {
     ),
   }));
 
-  const harnesses = AGENT_DEFS.map((def): HarnessReport => ({
-    id: def.id,
-    name: def.name,
-    syncPaths: def.syncPaths.map((syncPath): SyncPathReport => {
+  // Status never fails: an invalid declarations file leaves the built-ins
+  // reported as usual and becomes a caveat.
+  const harnessSet = readHarnessSet(deps.configDir);
+  const reported = harnessSet.ok ? harnessSet.harnesses : BUILT_IN_HARNESSES;
+
+  const harnesses = reported.map((harness): HarnessReport => ({
+    id: harness.id,
+    name: harness.name,
+    ...(harness.instructionsFile !== undefined
+      ? { instructionsFile: harness.instructionsFile }
+      : {}),
+    syncPaths: harnessPaths(harness).map((syncPath): SyncPathReport => {
       const path = getLocalSyncPath(syncPath, deps.homeDir);
       const snapshot = snapshotSyncPath(path);
       return snapshot
@@ -170,7 +190,12 @@ function runStatus(deps: InternalDeps): StatusReport {
         gathered.files.map((file) => [file.harness, driftStateOf(file)]),
       ),
     },
-    caveats: detectCaveats(deps),
+    caveats: [
+      ...(harnessSet.ok
+        ? []
+        : [invalidDeclarationsCaveat(deps.configDir, harnessSet.problems)]),
+      ...detectCaveats(deps),
+    ],
   };
 }
 

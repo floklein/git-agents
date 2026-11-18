@@ -8,9 +8,10 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { z } from "zod";
-import { AGENT_DEFS } from "../utils/agentDefs";
 import { CANONICAL_DIR } from "../canonical/canonical";
 import { SYNC_MANIFEST_FILE } from "../utils/manifest";
+import { HARNESS_DECLARATIONS_FILE } from "../utils/harnessDeclarations";
+import { harnessPaths, requireHarnessSet } from "../utils/harnessSet";
 import { getLocalSyncPath, getRemoteSyncPath } from "../utils/config";
 import { errorMessage } from "../utils/errors";
 import {
@@ -21,11 +22,25 @@ import {
 import { InternalCommandError, invalidInputError } from "./errors";
 import type { InternalDeps } from "./commands";
 
-const ALL_SYNC_PATHS = AGENT_DEFS.flatMap((def) => def.syncPaths);
+// Every path transport mirrors, for the harness set the clone declares right
+// now: read per call, because a merge can change the declarations file.
+// Refuses with invalid-harness-declarations when that file is invalid.
+function transportPaths(configDir: string): string[] {
+  return requireHarnessSet(configDir).flatMap(harnessPaths);
+}
+
 // CANONICAL_DIR rides in the commit scope so the unify flow's regeneration
 // travels with the same primitives; bare sync itself never reads or writes
 // canonical content, it only commits whatever already sits in the clone.
-const COMMIT_SCOPE = [...ALL_SYNC_PATHS, SYNC_MANIFEST_FILE, CANONICAL_DIR];
+// The declarations file rides in it so a declaration reaches every machine.
+function commitScope(syncPaths: string[]): string[] {
+  return [
+    ...syncPaths,
+    SYNC_MANIFEST_FILE,
+    CANONICAL_DIR,
+    HARNESS_DECLARATIONS_FILE,
+  ];
+}
 
 const TRANSPORT_STATE_FILE = ".git-agents-transport.json";
 // What the home directory held after this machine's last completed sync.
@@ -150,8 +165,8 @@ function readLastSyncedPaths(configDir: string): Set<string> {
   }
 }
 
-function writeLastSyncedPaths(deps: InternalDeps): void {
-  const paths = ALL_SYNC_PATHS.filter(
+function writeLastSyncedPaths(deps: InternalDeps, syncPaths: string[]): void {
+  const paths = syncPaths.filter(
     (syncPath) =>
       snapshotSyncPath(getLocalSyncPath(syncPath, deps.homeDir)) !== null,
   );
@@ -224,13 +239,14 @@ type PathChange = { path: string; status: string };
 function diffAgainstClone(
   deps: InternalDeps,
   direction: "outgoing" | "incoming",
+  syncPaths: string[],
 ): PathChange[] {
   // A missing source counts as a deletion only when this machine's home
   // actually held the path after its last sync; otherwise the other side
   // simply has content this machine never had.
   const lastSynced = readLastSyncedPaths(deps.configDir);
   const changes: PathChange[] = [];
-  for (const syncPath of ALL_SYNC_PATHS) {
+  for (const syncPath of syncPaths) {
     const localPath = getLocalSyncPath(syncPath, deps.homeDir);
     const remotePath = getRemoteSyncPath(syncPath, deps.configDir);
     const local = snapshotSyncPath(localPath);
@@ -252,8 +268,9 @@ function diffAgainstClone(
 function mirrorChanged(
   deps: InternalDeps,
   direction: "outgoing" | "incoming",
+  syncPaths: string[],
 ): PathChange[] {
-  const changes = diffAgainstClone(deps, direction);
+  const changes = diffAgainstClone(deps, direction, syncPaths);
   for (const change of changes) {
     const localPath = getLocalSyncPath(change.path, deps.homeDir);
     const remotePath = getRemoteSyncPath(change.path, deps.configDir);
@@ -266,8 +283,11 @@ function mirrorChanged(
   return changes;
 }
 
-async function stageScope(configDir: string): Promise<void> {
-  for (const scopePath of COMMIT_SCOPE) {
+async function stageScope(
+  configDir: string,
+  syncPaths: string[],
+): Promise<void> {
+  for (const scopePath of commitScope(syncPaths)) {
     const inWorktree = existsSync(join(configDir, ...scopePath.split("/")));
     const tracked = await git(configDir, "ls-files", "--", scopePath);
     if (!inWorktree && !(tracked.ok && tracked.output.trim())) continue;
@@ -315,6 +335,10 @@ export async function runTransportBegin(
     );
   }
 
+  // Before anything is written: an invalid declarations file stops the sync
+  // for every harness, with the clone and the home directory untouched.
+  const syncPaths = transportPaths(deps.configDir);
+
   // An existing marker means an earlier run never completed (push failure,
   // crash, or decline path): keep its pre-sync point so abort can always
   // reach the state the user last confirmed.
@@ -336,9 +360,9 @@ export async function runTransportBegin(
     );
   }
 
-  const outgoing = mirrorChanged(deps, "outgoing");
+  const outgoing = mirrorChanged(deps, "outgoing", syncPaths);
 
-  await stageScope(deps.configDir);
+  await stageScope(deps.configDir, syncPaths);
   const staged = await git(deps.configDir, "diff", "--cached", "--quiet");
   if (!staged.ok) {
     if (staged.exitCode !== 1) {
@@ -409,10 +433,16 @@ export async function runTransportBegin(
     }
   }
 
+  // The merge may have brought a changed declarations file: what comes home
+  // is decided by the merged set, the one transport-commit will mirror.
   return {
     state: "clean",
     outgoing,
-    incoming: diffAgainstClone(deps, "incoming"),
+    incoming: diffAgainstClone(
+      deps,
+      "incoming",
+      transportPaths(deps.configDir),
+    ),
   };
 }
 
@@ -522,8 +552,8 @@ export async function runTransportCommit(
     );
   }
 
-  let mergeCompleted = false;
-  if (mergeInProgress(deps.configDir)) {
+  const merging = mergeInProgress(deps.configDir);
+  if (merging) {
     const remaining = await conflictedPaths(deps.configDir);
     if (remaining.length > 0) {
       throw new InternalCommandError(
@@ -531,6 +561,15 @@ export async function runTransportCommit(
         `Conflicts remain unresolved: ${remaining.join(", ")}. Resolve them with transport-resolve first.`,
       );
     }
+  }
+
+  // After the conflict check, so a conflicted declarations file reads as a
+  // conflict; before the merge commit and the push, so an invalid one
+  // reaches neither the remote nor the home directory.
+  const syncPaths = transportPaths(deps.configDir);
+
+  let mergeCompleted = false;
+  if (merging) {
     const committed = await git(deps.configDir, "commit", "--no-edit");
     if (!committed.ok) {
       throw new InternalCommandError(
@@ -566,9 +605,9 @@ export async function runTransportCommit(
     pushed = true;
   }
 
-  const mirroredBack = mirrorChanged(deps, "incoming");
+  const mirroredBack = mirrorChanged(deps, "incoming", syncPaths);
 
-  writeLastSyncedPaths(deps);
+  writeLastSyncedPaths(deps, syncPaths);
   clearTransportState(deps.configDir);
   return { mergeCompleted, mirroredBack, pushed, pushDeferred: deferPush };
 }

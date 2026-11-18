@@ -142,6 +142,104 @@ describe("runInternalCommand", () => {
     expect((await states()).codex).toBe("stale");
   });
 
+  it("status reports built-in and custom harnesses in the declaration shape", async () => {
+    const deps = makeDeps();
+    writeFileSync(
+      join(deps.configDir, ".git-agents-harnesses.json"),
+      JSON.stringify({
+        version: 1,
+        harnesses: {
+          zed: { syncPaths: [".zed/prompts"] },
+          dsh: {
+            name: "DeepSeek Harness",
+            instructionsFile: ".dsh/AGENTS.md",
+            syncPaths: [".dsh/skills"],
+          },
+        },
+      }),
+      "utf8",
+    );
+    const dshMd = join(deps.homeDir, ".dsh", "AGENTS.md");
+    mkdirSync(join(deps.homeDir, ".dsh"), { recursive: true });
+    writeFileSync(dshMd, "# dsh\n", "utf8");
+
+    const status = await statusResult(deps);
+
+    expect(
+      status.harnesses.map((harness) => ({
+        id: harness.id,
+        name: harness.name,
+        instructionsFile: harness.instructionsFile,
+      })),
+    ).toEqual([
+      { id: "claude-code", name: "Claude Code", instructionsFile: ".claude/CLAUDE.md" },
+      { id: "codex", name: "Codex", instructionsFile: ".codex/AGENTS.md" },
+      { id: "cursor", name: "Cursor", instructionsFile: undefined },
+      { id: "gemini-cli", name: "Gemini CLI", instructionsFile: ".gemini/GEMINI.md" },
+      {
+        id: "opencode",
+        name: "OpenCode",
+        instructionsFile: ".config/opencode/AGENTS.md",
+      },
+      { id: "dsh", name: "DeepSeek Harness", instructionsFile: ".dsh/AGENTS.md" },
+      { id: "zed", name: "zed", instructionsFile: undefined },
+    ]);
+    expect(status.harnesses[2]).not.toHaveProperty("instructionsFile");
+
+    const dsh = status.harnesses.find((h) => h.id === "dsh")!;
+    expect(dsh.syncPaths).toEqual([
+      {
+        syncPath: ".dsh/AGENTS.md",
+        path: dshMd,
+        present: true,
+        kind: "file",
+        fileCount: 1,
+        contentHash: snapshotSyncPath(dshMd)!.contentHash,
+      },
+      {
+        syncPath: ".dsh/skills",
+        path: join(deps.homeDir, ".dsh", "skills"),
+        present: false,
+      },
+    ]);
+    expect(status.caveats).toEqual([]);
+  });
+
+  it("status succeeds on an invalid declarations file: built-ins plus a caveat", async () => {
+    const deps = makeDeps();
+    const file = join(deps.configDir, ".git-agents-harnesses.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        version: 1,
+        harnesses: {
+          dsh: { syncPaths: [".dsh/skills"], color: "blue" },
+          keys: { syncPaths: [".ssh/keys"] },
+        },
+      }),
+      "utf8",
+    );
+
+    const status = await statusResult(deps);
+
+    expect(status.harnesses.map((harness) => harness.id)).toEqual([
+      "claude-code",
+      "codex",
+      "cursor",
+      "gemini-cli",
+      "opencode",
+    ]);
+    expect(status.caveats).toHaveLength(1);
+    const caveat = status.caveats[0]!;
+    expect(caveat.code).toBe("invalid-harness-declarations");
+    expect(caveat.path).toBe(file);
+    expect(caveat.message).toContain('harness "dsh": unknown field "color"');
+    expect(caveat.message).toContain(
+      '".ssh/keys" is in the credential location ".ssh"',
+    );
+    expect(caveat.message).toContain("/git-agents harness");
+  });
+
   it("status output survives a JSON round trip unchanged", async () => {
     const outcome = await runInternalCommand("status", undefined, makeDeps());
 

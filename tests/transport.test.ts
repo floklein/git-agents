@@ -577,3 +577,200 @@ describe("transport", () => {
     expect(readHome(b, ".codex/AGENTS.md")).toBe("codex rules\n");
   }, 60000);
 });
+
+describe("transport with custom harnesses", () => {
+  const DECLARATIONS_FILE = ".git-agents-harnesses.json";
+  const DSH = {
+    version: 1,
+    harnesses: {
+      dsh: {
+        name: "DeepSeek Harness",
+        instructionsFile: ".dsh/AGENTS.md",
+        syncPaths: [".dsh/skills"],
+      },
+    },
+  };
+
+  function writeDeclarations(deps: InternalDeps, content: unknown): void {
+    writeFileSync(
+      join(deps.configDir, DECLARATIONS_FILE),
+      typeof content === "string" ? content : JSON.stringify(content, null, 2),
+      "utf8",
+    );
+  }
+
+  it("carries a declared harness's paths and the declarations file to another machine", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeDeclarations(a, DSH);
+    writeHome(a, ".dsh/AGENTS.md", "dsh instructions\n");
+    writeHome(a, ".dsh/skills/review/SKILL.md", "review skill\n");
+    writeHome(a, ".dsh/cache/tmp.txt", "not declared\n");
+
+    const begin = await runTransportBegin(a);
+    expect(begin.state).toBe("clean");
+    expect(begin.outgoing).toEqual([
+      { path: ".dsh/AGENTS.md", status: "added" },
+      { path: ".dsh/skills", status: "added" },
+    ]);
+    await runTransportCommit(a, undefined);
+
+    const b = makeMachine(bare);
+    const incoming = await runTransportBegin(b);
+    expect(incoming.state).toBe("clean");
+    expect(incoming.incoming).toEqual([
+      { path: ".dsh/AGENTS.md", status: "added" },
+      { path: ".dsh/skills", status: "added" },
+    ]);
+    const commit = await runTransportCommit(b, undefined);
+
+    expect(commit.mirroredBack).toEqual(incoming.incoming);
+    expect(readHome(b, ".dsh/AGENTS.md")).toBe("dsh instructions\n");
+    expect(readHome(b, ".dsh/skills/review/SKILL.md")).toBe("review skill\n");
+    expect(existsSync(join(b.homeDir, ".dsh", "cache"))).toBe(false);
+    expect(
+      JSON.parse(readFileSync(join(b.configDir, DECLARATIONS_FILE), "utf8")),
+    ).toEqual(DSH);
+  }, 30000);
+
+  it("carries edits and deletions of custom paths in both directions", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeDeclarations(a, DSH);
+    writeHome(a, ".dsh/AGENTS.md", "dsh instructions\n");
+    writeHome(a, ".dsh/skills/review/SKILL.md", "review skill\n");
+    await fullSync(a);
+    const b = makeMachine(bare);
+    await fullSync(b);
+
+    writeHome(b, ".dsh/AGENTS.md", "dsh instructions, edited on B\n");
+    rmSync(join(b.homeDir, ".dsh", "skills"), { recursive: true });
+    const begin = await runTransportBegin(b);
+    expect(begin.outgoing).toEqual([
+      { path: ".dsh/AGENTS.md", status: "modified" },
+      { path: ".dsh/skills", status: "removed" },
+    ]);
+    await runTransportCommit(b, undefined);
+
+    const back = await runTransportBegin(a);
+    expect(back.state).toBe("clean");
+    expect(back.incoming).toEqual([
+      { path: ".dsh/AGENTS.md", status: "modified" },
+      { path: ".dsh/skills", status: "removed" },
+    ]);
+    await runTransportCommit(a, undefined);
+    expect(readHome(a, ".dsh/AGENTS.md")).toBe("dsh instructions, edited on B\n");
+    expect(existsSync(join(a.homeDir, ".dsh", "skills"))).toBe(false);
+  }, 60000);
+
+  it("records the custom paths the home directory holds after a completed sync", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeDeclarations(a, DSH);
+    writeHome(a, ".claude/CLAUDE.md", "claude rules\n");
+    writeHome(a, ".dsh/AGENTS.md", "dsh instructions\n");
+    await fullSync(a);
+
+    const record = JSON.parse(
+      readFileSync(join(a.configDir, ".git-agents-last-sync.json"), "utf8"),
+    );
+    expect(record.paths).toEqual([".claude/CLAUDE.md", ".dsh/AGENTS.md"]);
+  }, 30000);
+
+  const INVALID = {
+    version: 1,
+    harnesses: {
+      dsh: { syncPaths: [".dsh/skills"], color: "blue" },
+      keys: { syncPaths: [".ssh/keys"] },
+    },
+  };
+
+  function expectInvalidDeclarations(error: unknown): void {
+    expect(error).toBeInstanceOf(InternalCommandError);
+    const { code, message } = error as InternalCommandError;
+    expect(code).toBe("invalid-harness-declarations");
+    // Every problem, then the remedy.
+    expect(message).toContain('harness "dsh": unknown field "color"');
+    expect(message).toContain('".ssh/keys" is in the credential location ".ssh"');
+    expect(message).toContain("/git-agents harness");
+    expect(message).toContain(DECLARATIONS_FILE);
+  }
+
+  it("refuses transport-begin on an invalid declarations file, built-ins included", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeDeclarations(a, INVALID);
+    writeHome(a, ".claude/CLAUDE.md", "claude rules\n");
+    writeHome(a, ".dsh/skills/review/SKILL.md", "review skill\n");
+
+    const error = await runTransportBegin(a).catch((e: unknown) => e);
+
+    expectInvalidDeclarations(error);
+    // Nothing was mirrored, committed or recorded: no transport began.
+    expect(existsSync(join(a.configDir, ".claude"))).toBe(false);
+    expect(existsSync(join(a.configDir, ".dsh"))).toBe(false);
+    expect(existsSync(join(a.configDir, ".git-agents-transport.json"))).toBe(false);
+    await expectCode(runTransportCommit(a, undefined), "no-transport");
+    expect(readHome(a, ".claude/CLAUDE.md")).toBe("claude rules\n");
+  }, 30000);
+
+  it("refuses transport-commit on an invalid declarations file, before pushing or touching home", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeHome(a, ".claude/CLAUDE.md", "claude rules\n");
+    await fullSync(a);
+
+    const b = makeMachine(bare);
+    writeHome(b, ".gemini/GEMINI.md", "gemini rules\n");
+    const begin = await runTransportBegin(b);
+    expect(begin.incoming).toEqual([
+      { path: ".claude/CLAUDE.md", status: "added" },
+    ]);
+    writeDeclarations(b, INVALID);
+
+    const error = await runTransportCommit(b, undefined).catch((e: unknown) => e);
+
+    expectInvalidDeclarations(error);
+    expect(existsSync(join(b.homeDir, ".claude"))).toBe(false);
+    const remoteFiles = execFileSync(
+      "git",
+      ["--git-dir", bare, "ls-tree", "-r", "--name-only", "main"],
+      { encoding: "utf8" },
+    );
+    expect(remoteFiles).not.toContain(".gemini/GEMINI.md");
+
+    // Fixing the file unblocks the same transport.
+    rmSync(join(b.configDir, DECLARATIONS_FILE));
+    await runTransportCommit(b, undefined);
+    expect(readHome(b, ".claude/CLAUDE.md")).toBe("claude rules\n");
+  }, 60000);
+
+  it("refuses transport-begin when the merge brings an invalid declarations file", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeHome(a, ".claude/CLAUDE.md", "claude rules\n");
+    await fullSync(a);
+    const b = makeMachine(bare);
+    await fullSync(b);
+
+    // An invalid file can only reach the remote from outside these commands.
+    writeDeclarations(a, INVALID);
+    for (const args of [
+      ["add", DECLARATIONS_FILE],
+      ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "invalid"],
+      ["push", "origin", "HEAD"],
+    ]) {
+      execFileSync("git", ["-C", a.configDir, ...args], { stdio: "ignore" });
+    }
+    writeHome(a, ".claude/CLAUDE.md", "claude rules, edited on A\n");
+
+    const error = await runTransportBegin(b).catch((e: unknown) => e);
+
+    expectInvalidDeclarations(error);
+    expect(readHome(b, ".claude/CLAUDE.md")).toBe("claude rules\n");
+    await expectCode(runTransportCommit(b, undefined), "invalid-harness-declarations");
+    const aborted = await runTransportAbort(b);
+    expect(aborted.aborted).toBe(true);
+    expect(existsSync(join(b.configDir, DECLARATIONS_FILE))).toBe(false);
+  }, 60000);
+});

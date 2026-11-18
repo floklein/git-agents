@@ -3,6 +3,14 @@ import { join } from "node:path";
 import { getLocalSyncPath } from "../utils/config";
 import { GENERATED_TARGETS } from "../canonical/canonical";
 import { CODEX_CAP_BYTES, CODEX_NEAR_CAP_BYTES } from "../canonical/limits";
+import {
+  HARNESS_DECLARATIONS_FILE,
+  type DeclarationProblem,
+} from "../utils/harnessDeclarations";
+import {
+  INVALID_HARNESS_DECLARATIONS,
+  listDeclarationProblems,
+} from "../utils/harnessSet";
 import type { InternalDeps } from "./commands";
 
 const GEMINI_DEFAULT_CONTEXT = "GEMINI.md";
@@ -12,7 +20,8 @@ export type Caveat = {
     | "codex-override-shadow"
     | "gemini-context-filename"
     | "codex-size-near-cap"
-    | "codex-size-over-cap";
+    | "codex-size-over-cap"
+    | typeof INVALID_HARNESS_DECLARATIONS;
   message: string;
   path?: string;
   bytes?: number;
@@ -34,6 +43,25 @@ function geminiContextFileNames(settingsPath: string): string[] | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * What status says in place of the refusal the other commands give: it never
+ * fails, so the problems travel as a caveat beside the built-ins.
+ */
+export function invalidDeclarationsCaveat(
+  configDir: string,
+  problems: readonly DeclarationProblem[],
+): Caveat {
+  return {
+    code: INVALID_HARNESS_DECLARATIONS,
+    message:
+      `${HARNESS_DECLARATIONS_FILE} is invalid: sync is blocked for every harness until it is fixed, ` +
+      "and only the built-in harnesses are reported. " +
+      `Problems:\n${listDeclarationProblems(problems)}\n` +
+      "Fix the file with /git-agents harness.",
+    path: join(configDir, HARNESS_DECLARATIONS_FILE),
+  };
 }
 
 export function detectCaveats(deps: InternalDeps): Caveat[] {
