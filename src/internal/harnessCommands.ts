@@ -16,9 +16,15 @@ import {
   type CustomHarness,
   type DeclarationProblem,
 } from "../utils/harnessDeclarations";
-import { listDeclarationProblems } from "../utils/harnessSet";
+import { buildHarnessSet, listDeclarationProblems } from "../utils/harnessSet";
 import { measureSyncPath } from "../utils/pathSize";
 import { unifiedDiff } from "../utils/textdiff";
+import {
+  applyRemoval,
+  planRemoval,
+  removesNothing,
+  type RemovalPlan,
+} from "./declarationRemoval";
 import { InternalCommandError } from "./errors";
 import type { InternalDeps } from "./commands";
 
@@ -43,11 +49,33 @@ export type StartSyncingPath = DeclaredPath & {
   totalBytes: number;
 };
 
+/** What a removal deletes from the sync repo, and only from there. */
+export type RemovalPreview = Pick<
+  RemovalPlan,
+  | "harnesses"
+  | "repoFiles"
+  | "overlays"
+  | "manifest"
+  | "canonicalVersionChanges"
+> & {
+  /** The statement that goes with every removal. */
+  homeFiles: string;
+};
+
+const HOME_FILES_STAY =
+  "Files in the home directory are left untouched, on this machine and on every machine that pulls the removal.";
+
 export type HarnessStageResult = {
   /** The exact diff of the declarations file `harness-apply` would write. */
   file: { path: string; changed: boolean; diff: string };
   startSyncing: StartSyncingPath[];
   stopSyncing: DeclaredPath[];
+  /**
+   * The repo cleanup `harness-apply` would make, when the proposal removes a
+   * harness or a path. Absent when the current file is invalid: there is no
+   * known set to clean up from.
+   */
+  removal?: RemovalPreview;
   /**
    * What makes the current file invalid, when it is: the proposal replaces
    * it whole. An invalid file counts as declaring nothing for the two lists.
@@ -151,13 +179,30 @@ function declaredPaths(harnesses: readonly CustomHarness[]): DeclaredPath[] {
   ]);
 }
 
-/** The entries of `paths` whose path is not among `others`. */
+/**
+ * The entries of `paths` whose path is not among `others`, whoever declares
+ * it there. Paths compare the way ownership does, case-insensitively.
+ */
 function pathsNotIn(
   paths: readonly DeclaredPath[],
   others: readonly DeclaredPath[],
 ): DeclaredPath[] {
-  const known = new Set(others.map((other) => other.path));
-  return paths.filter((entry) => !known.has(entry.path));
+  const known = new Set(others.map((other) => other.path.toLowerCase()));
+  return paths.filter((entry) => !known.has(entry.path.toLowerCase()));
+}
+
+// The cleanup that goes with replacing one set of declarations by another, or
+// null when the sync repo keeps everything.
+function removalBetween(
+  configDir: string,
+  before: readonly CustomHarness[],
+  after: readonly CustomHarness[],
+): { plan: RemovalPlan; apply: () => void } | null {
+  const kept = buildHarnessSet(after);
+  const plan = planRemoval(configDir, buildHarnessSet(before), kept);
+  return removesNothing(plan)
+    ? null
+    : { plan, apply: () => applyRemoval(configDir, plan, kept) };
 }
 
 /**
@@ -207,6 +252,9 @@ export function runHarnessStage(
   const after = content ?? "";
   const proposedPaths = declaredPaths(proposed.harnesses);
   const currentPaths = declaredPaths(current.ok ? current.harnesses : []);
+  const removal = current.ok
+    ? removalBetween(deps.configDir, current.harnesses, proposed.harnesses)
+    : null;
 
   const result: HarnessStageResult = {
     file: {
@@ -224,6 +272,18 @@ export function runHarnessStage(
       };
     }),
     stopSyncing: pathsNotIn(currentPaths, proposedPaths),
+    ...(removal !== null
+      ? {
+          removal: {
+            harnesses: removal.plan.harnesses,
+            repoFiles: removal.plan.repoFiles,
+            overlays: removal.plan.overlays,
+            manifest: removal.plan.manifest,
+            canonicalVersionChanges: removal.plan.canonicalVersionChanges,
+            homeFiles: HOME_FILES_STAY,
+          },
+        }
+      : {}),
     currentProblems: current.ok ? [] : current.problems,
   };
 
@@ -245,6 +305,18 @@ export function runHarnessStage(
 export type HarnessApplyResult = {
   path: string;
   written: boolean;
+  /**
+   * What the write removed from the sync repo clone, when it removed a
+   * harness or a path. Nothing is committed: the next `transport-begin`
+   * commits it with the declarations file.
+   */
+  removed?: {
+    repoFiles: string[];
+    /** The deleted overlay files, as paths in the sync repo. */
+    overlays: string[];
+    manifest: { generated: string[]; overlays: string[] };
+    canonicalVersionChanged: boolean;
+  };
 };
 
 function readStageFile(configDir: string): StageFileContent {
@@ -277,8 +349,10 @@ function readStageFile(configDir: string): StageFileContent {
 }
 
 /**
- * Writes the staged declarations file in the clone, and nothing else.
- * Refuses when nothing is staged or the file changed since staging.
+ * Writes the staged declarations file in the clone. When that removes a
+ * harness or a path, it also makes the repo cleanup there: the mirrored
+ * files, the overlay and the manifest entries. It never touches the home
+ * directory. Refuses when nothing is staged or the file changed since staging.
  */
 export function runHarnessApply(deps: InternalDeps): HarnessApplyResult {
   requireClone(deps.configDir);
@@ -295,14 +369,39 @@ export function runHarnessApply(deps: InternalDeps): HarnessApplyResult {
   const written =
     staged.content !== null &&
     (currentFile === null || textOf(currentFile) !== staged.content);
+  let removal: ReturnType<typeof removalBetween> = null;
   if (written) {
+    // Planned from the file being replaced, before it is gone. An invalid one
+    // gives no set to clean up from.
+    const before =
+      currentFile === null
+        ? { ok: true as const, harnesses: [] }
+        : parseHarnessDeclarations(currentFile.toString("utf8"));
+    const after = parseHarnessDeclarations(staged.content!);
+    if (before.ok && after.ok) {
+      removal = removalBetween(deps.configDir, before.harnesses, after.harnesses);
+    }
     writeFileSync(
       join(deps.configDir, HARNESS_DECLARATIONS_FILE),
       staged.content!,
       "utf8",
     );
+    removal?.apply();
   }
   rmSync(join(deps.configDir, HARNESS_STAGE_FILE), { force: true });
 
-  return { path: HARNESS_DECLARATIONS_FILE, written };
+  return {
+    path: HARNESS_DECLARATIONS_FILE,
+    written,
+    ...(removal !== null
+      ? {
+          removed: {
+            repoFiles: removal.plan.repoFiles,
+            overlays: removal.plan.overlays.map((overlay) => overlay.path),
+            manifest: removal.plan.manifest,
+            canonicalVersionChanged: removal.plan.canonicalVersionChanges,
+          },
+        }
+      : {}),
+  };
 }

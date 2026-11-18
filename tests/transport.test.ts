@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -18,7 +19,13 @@ import {
 import { defaultSetupFlowDeps, runSetup } from "../src/internal/setup";
 import { propagateCanonical } from "../src/canonical/canonical";
 import { InternalCommandError } from "../src/internal/errors";
-import type { InternalDeps } from "../src/internal/commands";
+import {
+  runInternalCommand,
+  type InternalDeps,
+  type StatusReport,
+} from "../src/internal/commands";
+import type { GatherResult } from "../src/canonical/gather";
+import type { HarnessStageResult } from "../src/internal/harnessCommands";
 
 // Keep temp-repo commits independent of the host's global git config.
 process.env.GIT_CONFIG_COUNT = "1";
@@ -1179,4 +1186,508 @@ describe("transport with custom harnesses", () => {
     await runTransportCommit(b, undefined);
     expect(readHome(b, ".dsh/AGENTS.md")).toBe("dsh instructions\n");
   }, 60000);
+
+  describe("removing and changing a declaration", () => {
+    const OVERLAY_FILE = "canonical/overlays/dsh.md";
+    const MANIFEST_FILE = ".git-agents-sync.json";
+
+    function writeClone(deps: InternalDeps, relPath: string, content: string): void {
+      const target = join(deps.configDir, ...relPath.split("/"));
+      mkdirSync(join(target, ".."), { recursive: true });
+      writeFileSync(target, content, "utf8");
+    }
+
+    // Every file of a home directory, by its path from there, with its content.
+    function readTree(root: string, prefix = ""): Record<string, string> {
+      const tree: Record<string, string> = {};
+      for (const entry of readdirSync(root, { withFileTypes: true })) {
+        const relPath = `${prefix}${entry.name}`;
+        if (entry.isDirectory()) {
+          Object.assign(tree, readTree(join(root, entry.name), `${relPath}/`));
+        } else {
+          tree[relPath] = readFileSync(join(root, entry.name), "utf8");
+        }
+      }
+      return tree;
+    }
+
+    async function command<T>(
+      deps: InternalDeps,
+      name: string,
+      input?: unknown,
+    ): Promise<T> {
+      const outcome = await runInternalCommand(name, input, deps);
+      if (!outcome.ok) throw new Error(`${name} failed: ${outcome.error.message}`);
+      return outcome.result as T;
+    }
+
+    // What `/git-agents harness` runs once the user confirms the gate.
+    async function declare(
+      deps: InternalDeps,
+      harnesses: Record<string, unknown>,
+    ): Promise<HarnessStageResult> {
+      const staged = await command<HarnessStageResult>(deps, "harness-stage", {
+        harnesses,
+      });
+      await command(deps, "harness-apply");
+      return staged;
+    }
+
+    // The files a commit changed, as `<status>\t<path>` lines.
+    function changedBy(deps: InternalDeps, commit: string): string[] {
+      return gitOut(deps, "show", "--name-status", "--format=", commit)
+        .split("\n")
+        .sort();
+    }
+
+    function committedManifest(deps: InternalDeps): {
+      canonical: { version: string; overlays: Record<string, string> };
+      generated: Record<string, { path: string; canonicalVersion: string }>;
+    } {
+      return JSON.parse(gitOut(deps, "show", `HEAD:${MANIFEST_FILE}`));
+    }
+
+    // Two machines that share a declared harness with an instructions file, a
+    // sync path and an overlay, converged and synced.
+    async function sharedDsh(): Promise<{
+      bare: string;
+      a: InternalDeps;
+      b: InternalDeps;
+    }> {
+      const { bare, a, b } = await twoMachines();
+      writeDeclarations(a, DSH);
+      writeHome(a, ".dsh/skills/review/SKILL.md", "review skill\n");
+      writeClone(a, "canonical/core.md", "# Shared\n");
+      writeClone(a, OVERLAY_FILE, "# DSH only\n");
+      propagateCanonical(a.configDir, a.homeDir);
+      await fullSync(a);
+      await fullSync(b);
+      expect(readHome(b, ".dsh/AGENTS.md")).toContain("# DSH only");
+      return { bare, a, b };
+    }
+
+    it("commits a removal made with harness-stage and harness-apply as one commit, and leaves the home directory alone", async () => {
+      const { a } = await sharedDsh();
+      const homeBefore = readTree(a.homeDir);
+      const headBefore = gitOut(a, "rev-parse", "HEAD");
+
+      await declare(a, {});
+      const begin = await runTransportBegin(a);
+      expect(begin).toMatchObject({ state: "clean", outgoing: [], incoming: [] });
+      await runTransportCommit(a, undefined);
+
+      expect(gitOut(a, "rev-list", "--count", `${headBefore}..HEAD`)).toBe("1");
+      expect(changedBy(a, "HEAD")).toEqual([
+        "D\t.dsh/AGENTS.md",
+        "D\t.dsh/skills/review/SKILL.md",
+        `D\t${OVERLAY_FILE}`,
+        `M\t${DECLARATIONS_FILE}`,
+        `M\t${MANIFEST_FILE}`,
+      ]);
+      expect(gitOut(a, "rev-parse", "origin/main")).toBe(
+        gitOut(a, "rev-parse", "HEAD"),
+      );
+      expect(gitOut(a, "status", "--porcelain", "--untracked-files=no")).toBe("");
+      const manifest = committedManifest(a);
+      expect(Object.keys(manifest.generated)).not.toContain("dsh");
+      expect(Object.keys(manifest.canonical.overlays)).not.toContain("dsh");
+      expect(readTree(a.homeDir)).toEqual(homeBefore);
+      expect(homeBefore[".dsh/AGENTS.md"]).toContain("ga:begin overlay harness=dsh");
+    }, 60000);
+
+    it("lets a machine that pulls the removal keep its home files, with no conflict for its local edits", async () => {
+      const { a, b } = await sharedDsh();
+      await declare(a, {});
+      await fullSync(a);
+      // B edited the harness's files since its last sync.
+      writeHome(b, ".dsh/AGENTS.md", "dsh instructions, edited on B\n");
+      writeHome(b, ".dsh/skills/review/SKILL.md", "review skill, edited on B\n");
+      const homeBefore = readTree(b.homeDir);
+
+      const begin = await runTransportBegin(b);
+
+      expect(begin).toEqual({
+        state: "clean",
+        outgoing: [],
+        incoming: [],
+        firstSync: [],
+        removed: {
+          harnesses: [{ harness: "dsh", name: "DeepSeek Harness" }],
+          paths: [
+            { ...DSH_PATH, path: ".dsh/AGENTS.md", present: true },
+            { ...DSH_PATH, path: ".dsh/skills", present: true },
+          ],
+        },
+      });
+      const commit = await runTransportCommit(b, undefined);
+      expect(commit.mirroredBack).toEqual([]);
+      expect(readTree(b.homeDir)).toEqual(homeBefore);
+      expect(existsSync(join(b.configDir, ".dsh"))).toBe(false);
+      expect(existsSync(join(b.configDir, ...OVERLAY_FILE.split("/")))).toBe(false);
+      expect(readDeclarations(b)).toEqual({ version: 1, harnesses: {} });
+      // The record is written from the merged set: the removed paths drop out.
+      const record = JSON.parse(
+        readFileSync(join(b.configDir, ".git-agents-last-sync.json"), "utf8"),
+      );
+      expect(record.paths).toEqual([
+        ".claude/CLAUDE.md",
+        ".codex/AGENTS.md",
+        ".gemini/GEMINI.md",
+        ".config/opencode/AGENTS.md",
+      ]);
+
+      // Later syncs name nothing, and the files stay where they are, unsynced.
+      rmSync(join(b.homeDir, ".dsh", "skills"), { recursive: true });
+      const later = await runTransportBegin(b);
+      expect(later).toEqual({
+        state: "clean",
+        outgoing: [],
+        incoming: [],
+        firstSync: [],
+      });
+      await runTransportCommit(b, undefined);
+      expect(readHome(b, ".dsh/AGENTS.md")).toBe("dsh instructions, edited on B\n");
+      await fullSync(a);
+      expect(readHome(a, ".dsh/skills/review/SKILL.md")).toBe("review skill\n");
+    }, 90000);
+
+    it("makes the same cleanup, in the same commit, for a removal made by editing the file by hand", async () => {
+      const { a } = await sharedDsh();
+      const homeBefore = readTree(a.homeDir);
+      const headBefore = gitOut(a, "rev-parse", "HEAD");
+
+      // Removed by hand: nothing but the declarations file is edited.
+      writeDeclarations(a, { version: 1, harnesses: {} });
+      const begin = await runTransportBegin(a);
+      expect(begin).toMatchObject({ state: "clean", outgoing: [], incoming: [] });
+      await runTransportCommit(a, undefined);
+
+      expect(gitOut(a, "rev-list", "--count", `${headBefore}..HEAD`)).toBe("1");
+      expect(changedBy(a, "HEAD")).toEqual([
+        "D\t.dsh/AGENTS.md",
+        "D\t.dsh/skills/review/SKILL.md",
+        `D\t${OVERLAY_FILE}`,
+        `M\t${DECLARATIONS_FILE}`,
+        `M\t${MANIFEST_FILE}`,
+      ]);
+      expect(existsSync(join(a.configDir, ".dsh"))).toBe(false);
+      const manifest = committedManifest(a);
+      expect(Object.keys(manifest.generated)).not.toContain("dsh");
+      expect(Object.keys(manifest.canonical.overlays)).not.toContain("dsh");
+      expect(readTree(a.homeDir)).toEqual(homeBefore);
+    }, 60000);
+
+    it("keeps the removal and its cleanup when the sync is declined", async () => {
+      const { a } = await sharedDsh();
+      const homeBefore = readTree(a.homeDir);
+
+      await declare(a, {});
+      await runTransportBegin(a);
+      await runTransportAbort(a);
+
+      expect(readDeclarations(a)).toEqual({ version: 1, harnesses: {} });
+      expect(existsSync(join(a.configDir, ".dsh"))).toBe(false);
+      expect(existsSync(join(a.configDir, ...OVERLAY_FILE.split("/")))).toBe(false);
+      expect(gitOut(a, "status", "--porcelain", "--untracked-files=no")).toBe("");
+      expect(readTree(a.homeDir)).toEqual(homeBefore);
+    }, 60000);
+
+    // The state of each generated file, as `status` reports it.
+    async function generatedStates(
+      deps: InternalDeps,
+    ): Promise<Record<string, string>> {
+      const report = await command<StatusReport>(deps, "status");
+      return Object.fromEntries(
+        report.generated.map((file) => [file.harness, file.state]),
+      );
+    }
+
+    // The script side of one `sync unify`: transport with the push deferred,
+    // gather, stage, apply, then the push. `overlays` is what the agent's
+    // merge adds to the canonical overlays.
+    async function unify(
+      deps: InternalDeps,
+      overlays: Record<string, string> = {},
+    ): Promise<GatherResult> {
+      expect((await runTransportBegin(deps)).state).toBe("clean");
+      await runTransportCommit(deps, { deferPush: true });
+      const gathered = await command<GatherResult>(deps, "gather");
+      await command(deps, "stage", {
+        core: gathered.core,
+        overlays: { ...gathered.overlays, ...overlays },
+        inputs: gathered.inputs,
+      });
+      await command(deps, "apply");
+      await fullSync(deps);
+      return gathered;
+    }
+
+    const BUILT_INS_STALE = {
+      claude: "stale",
+      codex: "stale",
+      gemini: "stale",
+      opencode: "stale",
+    };
+    const BUILT_INS_CURRENT = {
+      claude: "current",
+      codex: "current",
+      gemini: "current",
+      opencode: "current",
+    };
+
+    it("reads the remaining generated files as stale after removing a harness that had an overlay, until one sync unify", async () => {
+      const { a, b } = await sharedDsh();
+      expect(await generatedStates(a)).toEqual({
+        ...BUILT_INS_CURRENT,
+        dsh: "current",
+      });
+
+      const staged = await declare(a, {});
+      expect(staged.removal?.canonicalVersionChanges).toBe(true);
+      expect(await generatedStates(a)).toEqual(BUILT_INS_STALE);
+      await fullSync(a);
+      expect(await generatedStates(a)).toEqual(BUILT_INS_STALE);
+      await fullSync(b);
+      expect(await generatedStates(b)).toEqual(BUILT_INS_STALE);
+
+      await unify(a);
+
+      expect(await generatedStates(a)).toEqual(BUILT_INS_CURRENT);
+      await fullSync(b);
+      expect(await generatedStates(b)).toEqual(BUILT_INS_CURRENT);
+    }, 120000);
+
+    it("keeps the overlay when the instructions file moves, and leaves the old file in the home directory", async () => {
+      const { a, b } = await sharedDsh();
+      const oldFile = readHome(a, ".dsh/AGENTS.md");
+
+      const staged = await declare(a, {
+        dsh: { ...DSH.harnesses.dsh, instructionsFile: ".dsh/RULES.md" },
+      });
+
+      // The old path gets the removal treatment, the new one is newly declared.
+      expect(staged.stopSyncing).toEqual([
+        { harness: "dsh", field: "instructionsFile", path: ".dsh/AGENTS.md" },
+      ]);
+      expect(staged.startSyncing).toEqual([
+        {
+          harness: "dsh",
+          field: "instructionsFile",
+          path: ".dsh/RULES.md",
+          present: false,
+          fileCount: 0,
+          totalBytes: 0,
+        },
+      ]);
+      expect(staged.removal).toMatchObject({
+        harnesses: [],
+        repoFiles: [".dsh/AGENTS.md"],
+        overlays: [],
+        manifest: { generated: ["dsh"], overlays: [] },
+        canonicalVersionChanges: false,
+      });
+      expect(await generatedStates(a)).toEqual({
+        ...BUILT_INS_CURRENT,
+        dsh: "missing",
+      });
+
+      await unify(a);
+
+      expect(existsSync(join(a.configDir, ".dsh", "AGENTS.md"))).toBe(false);
+      expect(
+        readFileSync(join(a.configDir, ...OVERLAY_FILE.split("/")), "utf8"),
+      ).toBe("# DSH only\n");
+      expect(readHome(a, ".dsh/RULES.md")).toBe(oldFile);
+      expect(readHome(a, ".dsh/AGENTS.md")).toBe(oldFile);
+      expect(await generatedStates(a)).toEqual({
+        ...BUILT_INS_CURRENT,
+        dsh: "current",
+      });
+
+      const begin = await runTransportBegin(b);
+      expect(begin.removed).toEqual({
+        harnesses: [],
+        paths: [{ ...DSH_PATH, path: ".dsh/AGENTS.md", present: true }],
+      });
+      expect(begin.firstSync).toEqual([
+        {
+          ...DSH_PATH,
+          path: ".dsh/RULES.md",
+          direction: "incoming",
+          fileCount: 1,
+          totalBytes: Buffer.byteLength(oldFile),
+        },
+      ]);
+      await runTransportCommit(b, undefined);
+      expect(readHome(b, ".dsh/RULES.md")).toBe(oldFile);
+      expect(readHome(b, ".dsh/AGENTS.md")).toBe(oldFile);
+    }, 120000);
+
+    it("takes an id change for a removal plus a fresh declaration, and keeps syncing the paths the new id declares", async () => {
+      const { a, b } = await sharedDsh();
+      const homeBefore = readTree(a.homeDir);
+
+      const staged = await declare(a, { deepseek: DSH.harnesses.dsh });
+
+      // The paths only change owner: they never stop being synced.
+      expect(staged.stopSyncing).toEqual([]);
+      expect(staged.startSyncing).toEqual([]);
+      expect(staged.removal).toMatchObject({
+        harnesses: [{ harness: "dsh", name: "DeepSeek Harness" }],
+        repoFiles: [],
+        overlays: [
+          { harness: "dsh", path: OVERLAY_FILE, content: "# DSH only\n" },
+        ],
+        manifest: { generated: ["dsh"], overlays: ["dsh"] },
+        canonicalVersionChanges: true,
+      });
+      await fullSync(a);
+
+      expect(changedBy(a, "HEAD")).toEqual([
+        `D\t${OVERLAY_FILE}`,
+        `M\t${DECLARATIONS_FILE}`,
+        `M\t${MANIFEST_FILE}`,
+      ]);
+      expect(readTree(a.homeDir)).toEqual(homeBefore);
+
+      writeHome(b, ".dsh/skills/review/SKILL.md", "review skill, edited on B\n");
+      const begin = await runTransportBegin(b);
+      expect(begin).toEqual({
+        state: "clean",
+        outgoing: [{ path: ".dsh/skills", status: "modified" }],
+        incoming: [],
+        firstSync: [],
+        removed: {
+          harnesses: [{ harness: "dsh", name: "DeepSeek Harness" }],
+          paths: [],
+        },
+      });
+      await runTransportCommit(b, undefined);
+      await fullSync(a);
+      expect(readHome(a, ".dsh/skills/review/SKILL.md")).toBe(
+        "review skill, edited on B\n",
+      );
+    }, 120000);
+
+    it("converges a file left behind with its markers when the harness is declared again", async () => {
+      const { a } = await sharedDsh();
+      await declare(a, {});
+      await fullSync(a);
+      const leftBehind = readHome(a, ".dsh/AGENTS.md");
+      expect(leftBehind).toContain("ga:begin overlay harness=dsh");
+
+      const staged = await declare(a, DSH.harnesses);
+      expect(
+        staged.startSyncing.map((entry) => [entry.path, entry.present]),
+      ).toEqual([
+        [".dsh/AGENTS.md", true],
+        [".dsh/skills", true],
+      ]);
+      expect(await generatedStates(a)).toMatchObject({ dsh: "untracked" });
+
+      // An ordinary first convergence: the markers attribute the file, and the
+      // merge carries its overlay block back into the canonical.
+      const gathered = await unify(a, { dsh: "# DSH only\n" });
+
+      expect(gathered.files.find((file) => file.harness === "dsh")).toMatchObject({
+        markers: "parsed",
+        regions: [
+          { attribution: "core", changed: false },
+          {
+            attribution: "overlay",
+            changed: true,
+            content: "# DSH only\n",
+            canonical: null,
+          },
+        ],
+      });
+      expect(
+        readFileSync(join(a.configDir, ...OVERLAY_FILE.split("/")), "utf8"),
+      ).toBe("# DSH only\n");
+      expect(readHome(a, ".dsh/AGENTS.md")).toBe(leftBehind);
+      expect(await generatedStates(a)).toEqual({
+        ...BUILT_INS_CURRENT,
+        dsh: "current",
+      });
+    }, 120000);
+
+    it("keeps a removal made while an earlier sync was left unfinished, cleanup included", async () => {
+      const { a, b } = await sharedDsh();
+      const original = gitOut(b, "rev-parse", "HEAD");
+      // A rejected push leaves B's transport open, with its pre-sync point.
+      writeHome(b, ".gemini/GEMINI.md", "gemini rules, edited on B\n");
+      await runTransportBegin(b);
+      writeHome(a, ".codex/AGENTS.md", "codex rules, edited on A\n");
+      await fullSync(a);
+      await expectCode(runTransportCommit(b, undefined), "push-rejected");
+      const homeBefore = readTree(b.homeDir);
+
+      await declare(b, {});
+      await runTransportBegin(b);
+      await runTransportAbort(b);
+
+      // Back at the point the first run started from, plus the removal.
+      expect(gitOut(b, "rev-parse", "HEAD~1")).toBe(original);
+      expect(changedBy(b, "HEAD")).toEqual([
+        "D\t.dsh/AGENTS.md",
+        "D\t.dsh/skills/review/SKILL.md",
+        `D\t${OVERLAY_FILE}`,
+        `M\t${DECLARATIONS_FILE}`,
+        `M\t${MANIFEST_FILE}`,
+      ]);
+      expect(gitOut(b, "status", "--porcelain", "--untracked-files=no")).toBe("");
+      expect(readTree(b.homeDir)).toEqual(homeBefore);
+    }, 90000);
+
+    const RENAMED = {
+      version: 1,
+      harnesses: { dsh: { ...DSH.harnesses.dsh, name: "DSH" } },
+    };
+
+    it("deletes no home file on a machine that pulls a removal and keeps the harness when resolving the conflict", async () => {
+      const { a, b } = await sharedDsh();
+      await declare(a, {});
+      await fullSync(a);
+      // Meanwhile B changed the same declaration.
+      writeDeclarations(b, RENAMED);
+      const homeBefore = readTree(b.homeDir);
+
+      const begin = await runTransportBegin(b);
+      expect(begin.state).toBe("conflicts");
+      if (begin.state !== "conflicts") return;
+      expect(begin.conflicts.map((file) => file.path)).toEqual([DECLARATIONS_FILE]);
+      expect(begin.removed).toEqual({
+        harnesses: [{ harness: "dsh", name: "DeepSeek Harness" }],
+        paths: [
+          { ...DSH_PATH, path: ".dsh/AGENTS.md", present: true },
+          { ...DSH_PATH, path: ".dsh/skills", present: true },
+        ],
+      });
+      await runTransportResolve(b, {
+        files: [{ path: DECLARATIONS_FILE, side: "local" }],
+      });
+      await runTransportCommit(b, undefined);
+
+      expect(readDeclarations(b)).toEqual(RENAMED);
+      expect(readTree(b.homeDir)).toEqual(homeBefore);
+    }, 90000);
+
+    it("deletes no home file on the removing machine when a conflict is resolved by keeping the harness", async () => {
+      const { a, b } = await sharedDsh();
+      writeDeclarations(b, RENAMED);
+      await fullSync(b);
+      const homeBefore = readTree(a.homeDir);
+
+      await declare(a, {});
+      const begin = await runTransportBegin(a);
+      expect(begin.state).toBe("conflicts");
+      await runTransportResolve(a, {
+        files: [{ path: DECLARATIONS_FILE, side: "remote" }],
+      });
+      await runTransportCommit(a, undefined);
+
+      expect(readDeclarations(a)).toEqual(RENAMED);
+      expect(readTree(a.homeDir)).toEqual(homeBefore);
+    }, 90000);
+  });
 });

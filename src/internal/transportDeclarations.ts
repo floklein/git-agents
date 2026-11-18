@@ -11,18 +11,30 @@ import {
   INVALID_HARNESS_DECLARATIONS,
   buildHarnessSet,
   listDeclarationProblems,
+  readHarnessSet,
   type Harness,
 } from "../utils/harnessSet";
-import { pathsOnlyIn, type DeclaredPath } from "../utils/declaredPaths";
+import { getLocalSyncPath } from "../utils/config";
+import {
+  declaredPaths,
+  pathsOnlyIn,
+  type DeclaredPath,
+} from "../utils/declaredPaths";
 import { measureSyncPath, type SyncPathSize } from "../utils/pathSize";
+import {
+  applyRemoval,
+  planRemoval,
+  type RemovedHarness,
+} from "./declarationRemoval";
 import { InternalCommandError } from "./errors";
 import { NUL, git, type GitResult } from "./git";
 import type { ConflictFile } from "./transport";
 
 // What transport does about the declarations file: committing a pending
-// change, comparing the remote's file with the merge base's, listing the
-// paths synced for the first time, and reporting and resolving a merged file
-// that is invalid.
+// change with the repo cleanup of a removal, comparing the remote's file with
+// the merge base's, listing the paths synced for the first time and the ones
+// another machine removed, and reporting and resolving a merged file that is
+// invalid.
 
 // The paths git reports unmerged, as a set or as the map of their stages.
 type UnmergedPaths = { has(path: string): boolean };
@@ -53,6 +65,7 @@ export async function commitPendingDeclarations(
           `sync: harness declarations (${new Date().toISOString().slice(0, 10)})`,
           "--",
           file,
+          ...(await cleanUpAfterRemoval(configDir)),
         )
       : staged;
   const head = committed.ok
@@ -65,6 +78,38 @@ export async function commitPendingDeclarations(
     );
   }
   return head.output.trim();
+}
+
+// The repo cleanup that belongs in the commit of a pending declarations
+// change: what the file no longer declares, against the last commit. It is
+// made here for a file edited by hand, and found already made after
+// harness-apply. Returns the paths to commit with the file.
+async function cleanUpAfterRemoval(configDir: string): Promise<string[]> {
+  const head = await git(configDir, "rev-parse", "--verify", "--quiet", "HEAD^{commit}");
+  const committed = head.ok ? await harnessSetAt(configDir, "HEAD") : null;
+  const pending = readHarnessSet(configDir);
+  // Nothing committed yet, or an invalid file on either side: no known set
+  // to clean up from.
+  if (committed === null || !pending.ok) return [];
+
+  const plan = planRemoval(configDir, committed, pending.harnesses);
+  applyRemoval(configDir, plan, pending.harnesses);
+
+  const paths: string[] = [];
+  for (const path of plan.scope) {
+    const inWorktree = existsSync(join(configDir, ...path.split("/")));
+    const tracked = await git(configDir, "ls-files", "--", path);
+    if (!inWorktree && !(tracked.ok && tracked.output.trim())) continue;
+    const added = await git(configDir, "add", "-A", "--", path);
+    if (!added.ok) {
+      throw new InternalCommandError(
+        "transport-failed",
+        `Could not stage the cleanup of ${path}: ${added.error ?? "unknown error"}`,
+      );
+    }
+    paths.push(path);
+  }
+  return paths;
 }
 
 // Puts the declarations file back as a commit holds it and commits that, on
@@ -150,6 +195,11 @@ type RemoteDeclarationChanges = {
   // mirror set, so a file this machine already holds there is committed first
   // and meets the remote's as a both-added conflict.
   declared: DeclaredPath[];
+  // Paths the merge base declares and the remote does not: another machine
+  // removed them, and its cleanup deleted their repo copies. They leave the
+  // mirror set, so this machine's edits to those files are never committed
+  // and cannot meet that deletion as a conflict.
+  removed: DeclaredPath[];
 };
 
 // The remote's declarations against the merge base's. The base is the
@@ -158,8 +208,57 @@ type RemoteDeclarationChanges = {
 export function remoteDeclarationChanges(
   look: DeclarationsLook,
 ): RemoteDeclarationChanges {
-  if (look.remote === null) return { declared: [] };
-  return { declared: pathsOnlyIn(look.remote, look.base) };
+  if (look.remote === null) return { declared: [], removed: [] };
+  return {
+    declared: pathsOnlyIn(look.remote, look.base),
+    removed: pathsOnlyIn(look.base, look.remote),
+  };
+}
+
+export type RemovedPath = DeclaredPath & {
+  /** Whether this machine's home directory holds something there. */
+  present: boolean;
+};
+
+/** What another machine removed, for the gate: the home files stay. */
+export type RemovedDeclarations = {
+  /** Harnesses that are no longer declared at all. */
+  harnesses: RemovedHarness[];
+  /** Every path that is no longer declared, theirs and those of harnesses that remain. */
+  paths: RemovedPath[];
+};
+
+// What the remote removed since the merge base. With a merged set, what that
+// set declares all the same is not listed: it is still synced. Undefined when
+// there is nothing to name.
+export function removedListing(
+  look: DeclarationsLook,
+  merged: readonly Harness[] | null,
+  homeDir: string,
+): RemovedDeclarations | undefined {
+  if (look.remote === null) return undefined;
+  const remaining = [look.remote, ...(merged === null ? [] : [merged])];
+  const ids = new Set(remaining.flat().map((harness) => harness.id));
+  const kept = new Set(
+    (merged === null ? [] : declaredPaths(merged)).map(({ path }) =>
+      path.toLowerCase(),
+    ),
+  );
+
+  const harnesses = look.base
+    .filter((harness) => !ids.has(harness.id))
+    .map(({ id, name }): RemovedHarness => ({ harness: id, name }));
+  const paths = pathsOnlyIn(look.base, look.remote)
+    .filter(({ path }) => !kept.has(path.toLowerCase()))
+    .map(
+      (entry): RemovedPath => ({
+        ...entry,
+        present: measureSyncPath(getLocalSyncPath(entry.path, homeDir)) !== null,
+      }),
+    );
+  return harnesses.length === 0 && paths.length === 0
+    ? undefined
+    : { harnesses, paths };
 }
 
 export type FirstSyncPath = DeclaredPath &

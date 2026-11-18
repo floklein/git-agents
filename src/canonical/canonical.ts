@@ -6,6 +6,7 @@ import { requireHarnessSet, type Harness } from "../utils/harnessSet";
 import {
   readSyncManifest,
   writeSyncManifest,
+  type CanonicalManifest,
   type GeneratedManifestEntry,
 } from "../utils/manifest";
 
@@ -160,6 +161,23 @@ export function renderGeneratedFile(
   return output;
 }
 
+/** What the manifest records of a canonical content, for a harness set. */
+export function canonicalManifestSection(
+  canonical: CanonicalContent,
+  harnesses: readonly Harness[],
+): CanonicalManifest {
+  const overlays: Record<string, string> = {};
+  for (const harness of canonicalOverlayIds(harnesses)) {
+    const overlay = canonical.overlays[harness];
+    if (overlay !== undefined) overlays[harness] = hashContent(overlay);
+  }
+  return {
+    version: canonical.version,
+    core: hashContent(canonical.core),
+    overlays,
+  };
+}
+
 export type PropagateTargetResult = {
   harness: GeneratedTarget["harness"];
   syncPath: string;
@@ -205,17 +223,7 @@ export function propagateCanonical(
     return { harness: target.harness, syncPath: target.syncPath, path, changed };
   });
 
-  const overlayHashes: Record<string, string> = {};
-  for (const harness of canonicalOverlayIds(harnesses)) {
-    const overlay = canonical.overlays[harness];
-    if (overlay !== undefined) overlayHashes[harness] = hashContent(overlay);
-  }
-
-  const canonicalSection = {
-    version: canonical.version,
-    core: hashContent(canonical.core),
-    overlays: overlayHashes,
-  };
+  const canonicalSection = canonicalManifestSection(canonical, harnesses);
   const manifestUnchanged =
     manifest !== null &&
     JSON.stringify(manifest.canonical ?? null) ===

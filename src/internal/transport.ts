@@ -30,6 +30,12 @@ import {
 import { InternalCommandError, invalidInputError } from "./errors";
 import { NUL, git } from "./git";
 import {
+  LAST_SYNC_FILE,
+  forgetLastSyncedPaths,
+  readLastSyncedPaths,
+  writeLastSyncedPaths,
+} from "./lastSync";
+import {
   changedPathSize,
   commitPendingDeclarations,
   firstSyncListing,
@@ -38,10 +44,12 @@ import {
   lookAtDeclarations,
   mergedDeclarationProblems,
   remoteDeclarationChanges,
+  removedListing,
   resolveDeclarations,
   restoreDeclarations,
   sizeAt,
   type FirstSyncPath,
+  type RemovedDeclarations,
 } from "./transportDeclarations";
 import type { InternalDeps } from "./commands";
 
@@ -59,12 +67,6 @@ function commitScope(syncPaths: string[]): string[] {
 }
 
 const TRANSPORT_STATE_FILE = ".git-agents-transport.json";
-// What the home directory held after this machine's last completed sync.
-// Deletion detection needs exactly this per-machine memory: the home dir
-// is not git-tracked, so the clone's history cannot answer "did this
-// machine ever have that file", and without it a fresh machine's empty
-// home would read as a mass deletion.
-const LAST_SYNC_FILE = ".git-agents-last-sync.json";
 function requireClone(deps: InternalDeps): void {
   if (!existsSync(join(deps.configDir, ".git"))) {
     throw new InternalCommandError(
@@ -119,30 +121,6 @@ function readTransportState(configDir: string): TransportState | null {
 
 function clearTransportState(configDir: string): void {
   rmSync(statePath(configDir), { force: true });
-}
-
-function readLastSyncedPaths(configDir: string): Set<string> {
-  const path = join(configDir, LAST_SYNC_FILE);
-  if (!existsSync(path)) return new Set();
-  try {
-    const state = JSON.parse(readFileSync(path, "utf8"));
-    if (state?.version !== 1 || !Array.isArray(state.paths)) return new Set();
-    return new Set(state.paths.filter((p: unknown) => typeof p === "string"));
-  } catch {
-    return new Set();
-  }
-}
-
-function writeLastSyncedPaths(deps: InternalDeps, syncPaths: string[]): void {
-  const paths = syncPaths.filter(
-    (syncPath) =>
-      snapshotSyncPath(getLocalSyncPath(syncPath, deps.homeDir)) !== null,
-  );
-  writeFileSync(
-    join(deps.configDir, LAST_SYNC_FILE),
-    `${JSON.stringify({ version: 1, paths }, null, 2)}\n`,
-    "utf8",
-  );
 }
 
 async function conflictedEntries(
@@ -370,12 +348,16 @@ async function reopenMerge(configDir: string, localHead: string): Promise<void> 
 // firstSync is the gate listing for newly declared paths. It adds to the
 // outgoing and incoming lists, which still carry those paths, so a caller
 // that does not know the field loses nothing but the counts.
+// removed names what another machine removed, and is present only then. Those
+// paths are in neither list: nothing is synced there any more, and the files
+// in the home directory stay.
 export type TransportBeginResult =
   | {
       state: "clean";
       outgoing: PathChange[];
       incoming: PathChange[];
       firstSync: FirstSyncPath[];
+      removed?: RemovedDeclarations;
     }
   | {
       state: "conflicts";
@@ -383,7 +365,14 @@ export type TransportBeginResult =
       incoming: string[];
       conflicts: ConflictFile[];
       firstSync: FirstSyncPath[];
+      removed?: RemovedDeclarations;
     };
+
+function removedField(removed: RemovedDeclarations | undefined): {
+  removed?: RemovedDeclarations;
+} {
+  return removed === undefined ? {} : { removed };
+}
 
 export async function runTransportBegin(
   deps: InternalDeps,
@@ -430,10 +419,21 @@ export async function runTransportBegin(
   // this run, not the next one.
   const remoteTip = await fetchRemoteTip(deps.configDir);
   const look = await lookAtDeclarations(deps.configDir, remoteTip);
-  const syncPaths = uniquePaths([
-    ...declaredPaths(local),
-    ...remoteDeclarationChanges(look).declared,
-  ]).map(({ path }) => path);
+  const changes = remoteDeclarationChanges(look);
+  // And a path the remote removed is not mirrored at all: its files stay in
+  // the home directory, unsynced, and never meet the remote's deletion.
+  const unmanaged = new Set(
+    changes.removed.map(({ path }) => path.toLowerCase()),
+  );
+  const syncPaths = uniquePaths([...declaredPaths(local), ...changes.declared])
+    .map(({ path }) => path)
+    .filter((path) => !unmanaged.has(path.toLowerCase()));
+  // Their repo copies are about to go. Should the merge keep one of them
+  // declared after all, that must not read as a deletion to carry home.
+  forgetLastSyncedPaths(
+    deps.configDir,
+    changes.removed.map(({ path }) => path),
+  );
 
   // What this machine has synced before, for the gate listing: on a machine
   // that never completed a sync, every custom path is a first sync.
@@ -490,6 +490,7 @@ export async function runTransportBegin(
           ? sizeAt(deps.configDir, "MERGE_HEAD", path)
           : null,
       ),
+      ...removedField(removedListing(look, null, deps.homeDir)),
     };
   };
 
@@ -552,6 +553,7 @@ export async function runTransportBegin(
         getRemoteSyncPath(path, deps.configDir),
       ),
     ),
+    ...removedField(removedListing(look, mergedSet, deps.homeDir)),
   };
 }
 

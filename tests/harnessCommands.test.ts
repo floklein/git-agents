@@ -73,6 +73,38 @@ function writeHome(deps: InternalDeps, relPath: string, content: string): void {
   writeFileSync(target, content, "utf8");
 }
 
+// A file of the sync repo clone: a mirrored copy, an overlay, the core.
+function writeClone(deps: InternalDeps, relPath: string, content: string): void {
+  const target = join(deps.configDir, ...relPath.split("/"));
+  mkdirSync(join(target, ".."), { recursive: true });
+  writeFileSync(target, content, "utf8");
+}
+
+// Every file under a directory, by its path from there, with its content.
+function readTree(root: string, prefix = ""): Record<string, string> {
+  const tree: Record<string, string> = {};
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const relPath = `${prefix}${entry.name}`;
+    if (entry.isDirectory()) {
+      Object.assign(tree, readTree(join(root, entry.name), `${relPath}/`));
+    } else {
+      tree[relPath] = readFileSync(join(root, entry.name), "utf8");
+    }
+  }
+  return tree;
+}
+
+type Manifest = {
+  canonical: { version: string; core: string; overlays: Record<string, string> };
+  generated: Record<string, { path: string; canonicalVersion: string }>;
+};
+
+function readManifest(deps: InternalDeps): Manifest {
+  return JSON.parse(
+    readFileSync(join(deps.configDir, ".git-agents-sync.json"), "utf8"),
+  );
+}
+
 function declarationsPath(deps: InternalDeps): string {
   return join(deps.configDir, DECLARATIONS_FILE);
 }
@@ -304,6 +336,66 @@ describe("harness-stage", () => {
     ]);
   });
 
+  it("previews a removal: the repo files and the overlay that go, and that home files stay", async () => {
+    const deps = makeDeps();
+    writeDeclarations(deps, DSH_FILE_TEXT);
+    writeClone(deps, ".dsh/AGENTS.md", "repo copy");
+    writeClone(deps, ".dsh/skills/review/SKILL.md", "review skill");
+    writeClone(deps, ".dsh/skills/notes.txt", "notes");
+    writeClone(deps, ".claude/CLAUDE.md", "not a dsh file");
+    writeClone(deps, "canonical/core.md", "# Shared\n");
+    writeClone(deps, "canonical/overlays/dsh.md", "# DSH only\n");
+    writeClone(deps, "canonical/overlays/claude.md", "# Claude only\n");
+    // The manifest entries of the harness, as a sync unify records them.
+    expect((await runInternalCommand("propagate", undefined, deps)).ok).toBe(true);
+
+    const result = await stage(deps, { harnesses: {} });
+
+    expect(result.stopSyncing.map((entry) => entry.path)).toEqual([
+      ".dsh/AGENTS.md",
+      ".dsh/skills",
+    ]);
+    expect(result.removal).toEqual({
+      harnesses: [{ harness: "dsh", name: "DeepSeek Harness" }],
+      repoFiles: [
+        ".dsh/AGENTS.md",
+        ".dsh/skills/notes.txt",
+        ".dsh/skills/review/SKILL.md",
+      ],
+      overlays: [
+        {
+          harness: "dsh",
+          path: "canonical/overlays/dsh.md",
+          content: "# DSH only\n",
+        },
+      ],
+      manifest: { generated: ["dsh"], overlays: ["dsh"] },
+      canonicalVersionChanges: true,
+      homeFiles: expect.stringMatching(/home directory.*untouched.*every machine/),
+    });
+    // Staging previews; nothing is deleted yet.
+    expect(existsSync(join(deps.configDir, ".dsh", "AGENTS.md"))).toBe(true);
+    expect(
+      existsSync(join(deps.configDir, "canonical", "overlays", "dsh.md")),
+    ).toBe(true);
+  });
+
+  it("previews no removal when nothing stops syncing", async () => {
+    const deps = makeDeps();
+    writeDeclarations(deps, DSH_FILE_TEXT);
+    writeClone(deps, ".dsh/AGENTS.md", "repo copy");
+
+    const renamed = await stage(deps, {
+      harnesses: { dsh: { ...DSH, name: "DSH" } },
+    });
+    const grown = await stage(deps, {
+      harnesses: { dsh: DSH, zed: { syncPaths: [".zed/prompts"] } },
+    });
+
+    expect(renamed.removal).toBeUndefined();
+    expect(grown.removal).toBeUndefined();
+  });
+
   it("appears with harness-apply in the unknown-command help list", async () => {
     const error = await refusal("nope", undefined, makeDeps());
 
@@ -445,30 +537,178 @@ describe("harness-apply", () => {
     expect(existsSync(join(deps.configDir, STAGE_FILE))).toBe(false);
   });
 
-  it("writes an empty set over existing declarations and deletes nothing else", async () => {
+  it("writes an empty set over existing declarations and cleans the sync repo, never the home directory", async () => {
     const deps = makeDeps();
     writeDeclarations(deps, DSH_FILE_TEXT);
-    writeHome(deps, ".dsh/AGENTS.md", "home copy");
-    mkdirSync(join(deps.configDir, ".dsh", "skills"), { recursive: true });
-    writeFileSync(join(deps.configDir, ".dsh", "AGENTS.md"), "repo copy", "utf8");
+    writeClone(deps, ".dsh/AGENTS.md", "repo copy");
+    writeClone(deps, ".dsh/skills/review/SKILL.md", "review skill");
+    writeClone(deps, ".claude/CLAUDE.md", "not a dsh file");
+    writeClone(deps, "canonical/core.md", "# Shared\n");
+    writeClone(deps, "canonical/overlays/dsh.md", "# DSH only\n");
+    writeClone(deps, "canonical/overlays/claude.md", "# Claude only\n");
+    expect((await runInternalCommand("propagate", undefined, deps)).ok).toBe(true);
+    writeHome(deps, ".dsh/skills/review/SKILL.md", "home skill");
+    const homeBefore = readTree(deps.homeDir);
+    expect(Object.keys(homeBefore)).toContain(".dsh/AGENTS.md");
 
     const staged = await stage(deps, { harnesses: {} });
     expect(staged.stopSyncing.map((entry) => entry.path)).toEqual([
       ".dsh/AGENTS.md",
       ".dsh/skills",
     ]);
-    await apply(deps);
+    const result = await apply(deps);
 
+    expect(result).toEqual({
+      path: DECLARATIONS_FILE,
+      written: true,
+      removed: {
+        repoFiles: [".dsh/AGENTS.md", ".dsh/skills/review/SKILL.md"],
+        overlays: ["canonical/overlays/dsh.md"],
+        manifest: { generated: ["dsh"], overlays: ["dsh"] },
+        canonicalVersionChanged: true,
+      },
+    });
     expect(readFileSync(declarationsPath(deps), "utf8")).toBe(
       '{\n  "version": 1,\n  "harnesses": {}\n}\n',
     );
+    // The mirrored files and the overlay are gone from the clone, and only they.
+    expect(existsSync(join(deps.configDir, ".dsh"))).toBe(false);
+    expect(
+      existsSync(join(deps.configDir, "canonical", "overlays", "dsh.md")),
+    ).toBe(false);
+    expect(
+      readFileSync(join(deps.configDir, ".claude", "CLAUDE.md"), "utf8"),
+    ).toBe("not a dsh file");
+    // The manifest is what a repo that never declared the harness records,
+    // except that the generated files were made from the earlier version.
+    const neverDeclared = makeDeps();
+    writeClone(neverDeclared, "canonical/core.md", "# Shared\n");
+    writeClone(neverDeclared, "canonical/overlays/claude.md", "# Claude only\n");
+    await runInternalCommand("propagate", undefined, neverDeclared);
+    const manifest = readManifest(deps);
+    const reference = readManifest(neverDeclared);
+    expect(manifest.canonical).toEqual(reference.canonical);
+    expect(Object.keys(manifest.generated)).toEqual(
+      Object.keys(reference.generated),
+    );
+    expect(manifest.generated.claude?.canonicalVersion).not.toBe(
+      manifest.canonical.version,
+    );
+    // Not one file of the home directory changed.
+    expect(readTree(deps.homeDir)).toEqual(homeBefore);
+  });
+
+  it("deletes only the repo copies of a path that leaves a harness which keeps others", async () => {
+    const deps = makeDeps();
+    writeDeclarations(deps, DSH_FILE_TEXT);
+    writeClone(deps, ".dsh/AGENTS.md", "repo copy");
+    writeClone(deps, ".dsh/skills/review/SKILL.md", "review skill");
+    writeClone(deps, "canonical/core.md", "# Shared\n");
+    writeClone(deps, "canonical/overlays/dsh.md", "# DSH only\n");
+    await runInternalCommand("propagate", undefined, deps);
+    writeHome(deps, ".dsh/skills/review/SKILL.md", "home skill");
+    const homeBefore = readTree(deps.homeDir);
+    const manifestBefore = readManifest(deps);
+
+    const staged = await stage(deps, {
+      harnesses: { dsh: { name: DSH.name, instructionsFile: DSH.instructionsFile } },
+    });
+    const result = await apply(deps);
+
+    expect(staged.stopSyncing).toEqual([
+      { harness: "dsh", field: "syncPaths", path: ".dsh/skills" },
+    ]);
+    expect(staged.removal).toMatchObject({
+      harnesses: [],
+      repoFiles: [".dsh/skills/review/SKILL.md"],
+      overlays: [],
+      manifest: { generated: [], overlays: [] },
+      canonicalVersionChanges: false,
+    });
+    expect(result.removed?.repoFiles).toEqual([".dsh/skills/review/SKILL.md"]);
+    expect(existsSync(join(deps.configDir, ".dsh", "skills"))).toBe(false);
     expect(
       readFileSync(join(deps.configDir, ".dsh", "AGENTS.md"), "utf8"),
     ).toBe("repo copy");
-    expect(existsSync(join(deps.configDir, ".dsh", "skills"))).toBe(true);
-    expect(readFileSync(join(deps.homeDir, ".dsh", "AGENTS.md"), "utf8")).toBe(
-      "home copy",
+    expect(
+      readFileSync(
+        join(deps.configDir, "canonical", "overlays", "dsh.md"),
+        "utf8",
+      ),
+    ).toBe("# DSH only\n");
+    expect(readManifest(deps)).toEqual(manifestBefore);
+    expect(readTree(deps.homeDir)).toEqual(homeBefore);
+  });
+
+  it("keeps the repo copies a remaining declaration covers when a declared directory is narrowed", async () => {
+    const deps = makeDeps();
+    writeDeclarations(deps, DSH_FILE_TEXT);
+    writeClone(deps, ".dsh/skills/review/SKILL.md", "review skill");
+    writeClone(deps, ".dsh/skills/notes.txt", "notes");
+
+    const staged = await stage(deps, {
+      harnesses: { dsh: { ...DSH, syncPaths: [".dsh/skills/review"] } },
+    });
+    await apply(deps);
+
+    expect(staged.stopSyncing.map((entry) => entry.path)).toEqual([".dsh/skills"]);
+    expect(staged.startSyncing.map((entry) => entry.path)).toEqual([
+      ".dsh/skills/review",
+    ]);
+    expect(staged.removal?.repoFiles).toEqual([".dsh/skills/notes.txt"]);
+    expect(existsSync(join(deps.configDir, ".dsh", "skills", "notes.txt"))).toBe(
+      false,
     );
+    expect(
+      readFileSync(
+        join(deps.configDir, ".dsh", "skills", "review", "SKILL.md"),
+        "utf8",
+      ),
+    ).toBe("review skill");
+  });
+
+  it("takes a path that moves to another harness or field for one that keeps syncing", async () => {
+    const deps = makeDeps();
+    writeDeclarations(deps, DSH_FILE_TEXT);
+    writeClone(deps, ".dsh/AGENTS.md", "repo copy");
+    writeClone(deps, ".dsh/skills/review/SKILL.md", "review skill");
+
+    // The skills go to another harness, and the instructions file becomes a
+    // path that only transports.
+    const staged = await stage(deps, {
+      harnesses: {
+        dsh: { name: DSH.name, syncPaths: [".dsh/AGENTS.md"] },
+        zed: { syncPaths: [".DSH/skills"] },
+      },
+    });
+    const result = await apply(deps);
+
+    expect(staged.startSyncing).toEqual([]);
+    expect(staged.stopSyncing).toEqual([]);
+    expect(staged.removal).toBeUndefined();
+    expect(result).toEqual({ path: DECLARATIONS_FILE, written: true });
+    expect(
+      readFileSync(join(deps.configDir, ".dsh", "AGENTS.md"), "utf8"),
+    ).toBe("repo copy");
+    expect(
+      existsSync(join(deps.configDir, ".dsh", "skills", "review", "SKILL.md")),
+    ).toBe(true);
+  });
+
+  it("makes no cleanup when the file it replaces is invalid", async () => {
+    const deps = makeDeps();
+    writeDeclarations(deps, '{ "version": 1, "harnesses": { "dsh": {} } }');
+    writeClone(deps, ".dsh/AGENTS.md", "repo copy");
+
+    const staged = await stage(deps, { harnesses: {} });
+    const result = await apply(deps);
+
+    expect(staged.currentProblems).not.toEqual([]);
+    expect(staged.removal).toBeUndefined();
+    expect(result).toEqual({ path: DECLARATIONS_FILE, written: true });
+    expect(
+      readFileSync(join(deps.configDir, ".dsh", "AGENTS.md"), "utf8"),
+    ).toBe("repo copy");
   });
 
   it("leaves the home directory untouched", async () => {
