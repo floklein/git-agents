@@ -24,6 +24,7 @@ import {
   runTransportCommit,
   runTransportResolve,
 } from "./transport";
+import { runHarnessApply, runHarnessStage } from "./harnessCommands";
 import { defaultSetupFlowDeps, runSetup, type SetupFlowDeps } from "./setup";
 import { runVersionCheck } from "./versionCheck";
 import {
@@ -132,9 +133,14 @@ function runStatus(deps: InternalDeps): StatusReport {
     manifestError = error?.message ?? String(error);
   }
 
+  // Status never fails: an invalid declarations file leaves the built-ins
+  // reported as usual and becomes a caveat.
+  const harnessSet = readHarnessSet(deps.configDir);
+  const reported = harnessSet.ok ? harnessSet.harnesses : BUILT_IN_HARNESSES;
+
   // One gather pass feeds both the generated states and the drift summary,
   // so a single status report cannot disagree with itself.
-  const gathered = gatherDrift(deps.configDir, deps.homeDir);
+  const gathered = gatherDrift(deps.configDir, deps.homeDir, reported);
   const canonicalVersion = gathered.canonicalVersion;
 
   const generated = gathered.files.map((file): GeneratedFileReport => ({
@@ -149,11 +155,6 @@ function runStatus(deps: InternalDeps): StatusReport {
       manifest?.generated?.[file.harness],
     ),
   }));
-
-  // Status never fails: an invalid declarations file leaves the built-ins
-  // reported as usual and becomes a caveat.
-  const harnessSet = readHarnessSet(deps.configDir);
-  const reported = harnessSet.ok ? harnessSet.harnesses : BUILT_IN_HARNESSES;
 
   const harnesses = reported.map((harness): HarnessReport => ({
     id: harness.id,
@@ -223,6 +224,8 @@ const COMMANDS: Record<
       `and follow its contents as global instructions. If ${canonicalOverlayPath(deps.configDir, "cursor")} ` +
       "exists, read and follow it as well.",
   }),
+  "harness-stage": (deps, input) => runHarnessStage(deps, input),
+  "harness-apply": (deps) => runHarnessApply(deps),
 };
 
 export async function runInternalCommand(

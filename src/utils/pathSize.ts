@@ -1,65 +1,56 @@
-import {
-  lstatSync,
-  readdirSync,
-  realpathSync,
-  statSync,
-  type Stats,
-} from "node:fs";
-import { join } from "node:path";
+import { lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 
-export type PathSize = { fileCount: number; totalBytes: number };
+export type SyncPathSize = {
+  /** Files and links, counted the way `snapshotSyncPath` counts them. */
+  fileCount: number;
+  /** The bytes of every regular file; a link adds none. */
+  totalBytes: number;
+};
 
 /**
- * How many files a file or directory holds and their total size in bytes, or
- * null when nothing is there. Counts what a sync path snapshot counts: a
- * symlink is one file, except a Windows directory link, which is walked.
+ * The file count and total size of a sync path, a file or a directory, or
+ * null when nothing is there. Links are not followed, except a Windows
+ * directory link or junction, which mirroring copies as the directory it
+ * points at.
  */
-export function measurePath(path: string): PathSize | null {
-  let stat: Stats;
-  try {
-    stat = lstatSync(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
-  }
-  const size: PathSize = { fileCount: 0, totalBytes: 0 };
-  addPath(path, stat, size, new Set());
-  return size;
+export function measureSyncPath(path: string): SyncPathSize | null {
+  const size: SyncPathSize = { fileCount: 0, totalBytes: 0 };
+  return measure(path, size, new Set()) ? size : null;
 }
 
-function addPath(
+function measure(
   path: string,
-  linkStat: Stats,
-  size: PathSize,
+  size: SyncPathSize,
   ancestors: Set<string>,
-): void {
-  const stat = isWindowsDirectoryLink(path, linkStat)
-    ? statSync(path)
-    : linkStat;
-  if (!stat.isDirectory()) {
-    if (stat.isFile() || stat.isSymbolicLink()) {
-      size.fileCount += 1;
-      size.totalBytes += stat.size;
+): boolean {
+  let stat;
+  try {
+    stat = lstatSync(path);
+    if (stat.isSymbolicLink() && process.platform === "win32") {
+      const target = statSync(path, { throwIfNoEntry: false });
+      if (target?.isDirectory()) stat = target;
     }
-    return;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT" || code === "ENOTDIR") return false;
+    throw error;
+  }
+
+  if (!stat.isDirectory()) {
+    if (stat.isFile()) size.totalBytes += stat.size;
+    if (stat.isFile() || stat.isSymbolicLink()) size.fileCount += 1;
+    return true;
   }
 
   // A directory link whose target contains the link would never end.
-  const real = realpathSync(path).toLowerCase();
-  if (ancestors.has(real)) return;
-  ancestors.add(real);
+  const real = realpathSync(path);
+  const key = process.platform === "win32" ? real.toLowerCase() : real;
+  if (ancestors.has(key)) return true;
+  ancestors.add(key);
   for (const name of readdirSync(path)) {
-    const child = join(path, name);
-    addPath(child, lstatSync(child), size, ancestors);
+    measure(resolve(path, name), size, ancestors);
   }
-  ancestors.delete(real);
-}
-
-function isWindowsDirectoryLink(path: string, linkStat: Stats): boolean {
-  if (process.platform !== "win32" || !linkStat.isSymbolicLink()) return false;
-  try {
-    return statSync(path).isDirectory();
-  } catch {
-    return false;
-  }
+  ancestors.delete(key);
+  return true;
 }

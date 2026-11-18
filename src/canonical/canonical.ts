@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getLocalSyncPath } from "../utils/config";
+import { requireHarnessSet, type Harness } from "../utils/harnessSet";
 import {
   readSyncManifest,
   writeSyncManifest,
@@ -27,13 +28,15 @@ export const CANONICAL_HARNESSES: CanonicalHarness[] = [
   "cursor",
 ];
 
+/** A generated file: `harness` is the overlay id, built-in or custom. */
 export type GeneratedTarget = {
-  harness: Exclude<CanonicalHarness, "cursor">;
+  harness: string;
   syncPath: string;
 };
 
 // Cursor has no global instructions file, so it receives no generated copy;
 // its overlay is read only through the opt-in pointer rule.
+// The built-in targets alone; `generatedTargets` gives those of a harness set.
 export const GENERATED_TARGETS: GeneratedTarget[] = [
   { harness: "claude", syncPath: ".claude/CLAUDE.md" },
   { harness: "codex", syncPath: ".codex/AGENTS.md" },
@@ -41,11 +44,44 @@ export const GENERATED_TARGETS: GeneratedTarget[] = [
   { harness: "opencode", syncPath: ".config/opencode/AGENTS.md" },
 ];
 
+/** Overlay contents keyed by overlay id, built-in or custom. */
+export type CanonicalOverlays = Record<string, string | undefined>;
+
 export type CanonicalContent = {
   core: string;
-  overlays: Partial<Record<CanonicalHarness, string>>;
+  overlays: CanonicalOverlays;
   version: string;
 };
+
+// The one order overlays are hashed, listed and recorded in: the built-ins in
+// their fixed order, then every other id sorted. It depends on the ids alone,
+// so it is the same on every machine.
+function inCanonicalOrder(ids: readonly string[]): string[] {
+  const builtIns: readonly string[] = CANONICAL_HARNESSES;
+  return [
+    ...builtIns.filter((id) => ids.includes(id)),
+    ...[...new Set(ids.filter((id) => !builtIns.includes(id)))].sort(),
+  ];
+}
+
+/** The overlay ids of a harness set, in canonical order. */
+export function canonicalOverlayIds(harnesses: readonly Harness[]): string[] {
+  return inCanonicalOrder(harnesses.map((harness) => harness.overlayId));
+}
+
+/**
+ * The files convergence generates for a harness set: one per harness that has
+ * an instructions file, in the order of the set.
+ */
+export function generatedTargets(
+  harnesses: readonly Harness[],
+): GeneratedTarget[] {
+  return harnesses.flatMap((harness) =>
+    harness.instructionsFile !== undefined
+      ? [{ harness: harness.overlayId, syncPath: harness.instructionsFile }]
+      : [],
+  );
+}
 
 export function hashContent(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
@@ -53,11 +89,11 @@ export function hashContent(content: string): string {
 
 export function computeCanonicalVersion(
   core: string,
-  overlays: Partial<Record<CanonicalHarness, string>>,
+  overlays: CanonicalOverlays,
 ): string {
   const hash = createHash("sha256");
   hash.update(`core\0${core}\0`, "utf8");
-  for (const harness of CANONICAL_HARNESSES) {
+  for (const harness of inCanonicalOrder(Object.keys(overlays))) {
     const overlay = overlays[harness];
     if (overlay !== undefined) {
       hash.update(`overlay:${harness}\0${overlay}\0`, "utf8");
@@ -72,18 +108,25 @@ export function canonicalCorePath(configDir: string): string {
 
 export function canonicalOverlayPath(
   configDir: string,
-  harness: CanonicalHarness,
+  harness: string,
 ): string {
   return join(configDir, CANONICAL_DIR, CANONICAL_OVERLAYS_DIR, `${harness}.md`);
 }
 
-export function readCanonical(configDir: string): CanonicalContent | null {
+/**
+ * The canonical content of a clone, with the overlays of the given harnesses.
+ * An overlay file that belongs to no harness of the set is not read.
+ */
+export function readCanonical(
+  configDir: string,
+  harnesses: readonly Harness[] = requireHarnessSet(configDir),
+): CanonicalContent | null {
   const corePath = canonicalCorePath(configDir);
   if (!existsSync(corePath)) return null;
   const core = readFileSync(corePath, "utf8");
 
-  const overlays: Partial<Record<CanonicalHarness, string>> = {};
-  for (const harness of CANONICAL_HARNESSES) {
+  const overlays: CanonicalOverlays = {};
+  for (const harness of canonicalOverlayIds(harnesses)) {
     const overlayPath = canonicalOverlayPath(configDir, harness);
     if (!existsSync(overlayPath)) continue;
     const overlay = readFileSync(overlayPath, "utf8");
@@ -99,7 +142,7 @@ export function withTrailingNewline(content: string): string {
 
 export function renderGeneratedFile(
   canonical: CanonicalContent,
-  harness: Exclude<CanonicalHarness, "cursor">,
+  harness: string,
 ): string {
   let output =
     `<!-- ga:begin core v=${canonical.version} -->\n` +
@@ -132,8 +175,9 @@ export type PropagateResult = {
 export function propagateCanonical(
   configDir: string,
   homeDir: string,
+  harnesses: readonly Harness[] = requireHarnessSet(configDir),
 ): PropagateResult {
-  const canonical = readCanonical(configDir);
+  const canonical = readCanonical(configDir, harnesses);
   if (!canonical) {
     throw new Error(
       `No canonical content found. Seed ${CANONICAL_DIR}/${CANONICAL_CORE} in the sync repository first.`,
@@ -142,7 +186,7 @@ export function propagateCanonical(
 
   const manifest = readSyncManifest(configDir);
   const generated: Record<string, GeneratedManifestEntry> = {};
-  const targets = GENERATED_TARGETS.map((target): PropagateTargetResult => {
+  const targets = generatedTargets(harnesses).map((target): PropagateTargetResult => {
     const content = renderGeneratedFile(canonical, target.harness);
     const path = getLocalSyncPath(target.syncPath, homeDir);
     const existing = existsSync(path) ? readFileSync(path, "utf8") : null;
@@ -162,7 +206,7 @@ export function propagateCanonical(
   });
 
   const overlayHashes: Record<string, string> = {};
-  for (const harness of CANONICAL_HARNESSES) {
+  for (const harness of canonicalOverlayIds(harnesses)) {
     const overlay = canonical.overlays[harness];
     if (overlay !== undefined) overlayHashes[harness] = hashContent(overlay);
   }

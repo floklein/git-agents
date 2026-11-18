@@ -1,8 +1,8 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { measurePath } from "../src/utils/pathSize";
+import { measureSyncPath } from "../src/utils/pathSize";
 
 const tempDirs: string[] = [];
 
@@ -17,34 +17,39 @@ function makeTmpDir(): string {
 }
 
 afterEach(() => {
-  for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+  for (const dir of tempDirs) {
+    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+  }
   tempDirs.length = 0;
 });
 
-describe("measurePath", () => {
-  it("reports nothing where no file or directory exists", () => {
-    expect(measurePath(join(makeTmpDir(), "missing"))).toBeNull();
+describe("measureSyncPath", () => {
+  it("returns null when nothing is at the path", () => {
+    expect(measureSyncPath(join(makeTmpDir(), "missing"))).toBeNull();
   });
 
-  it("measures a single file", () => {
+  it("measures a single file in bytes", () => {
     const file = join(makeTmpDir(), "AGENTS.md");
-    writeFileSync(file, "12345");
+    writeFileSync(file, "héllo", "utf8");
 
-    expect(measurePath(file)).toEqual({ fileCount: 1, totalBytes: 5 });
+    expect(measureSyncPath(file)).toEqual({ fileCount: 1, totalBytes: 6 });
   });
 
-  it("counts every file under a directory and sums their bytes", () => {
+  it("measures every file under a directory", () => {
     const dir = makeTmpDir();
-    mkdirSync(join(dir, "review", "notes"), { recursive: true });
+    mkdirSync(join(dir, "a", "b"), { recursive: true });
     mkdirSync(join(dir, "empty"));
-    writeFileSync(join(dir, "top.md"), "abc");
-    writeFileSync(join(dir, "review", "SKILL.md"), "1234567");
-    writeFileSync(join(dir, "review", "notes", "a.bin"), Buffer.alloc(1000));
+    writeFileSync(join(dir, "top.txt"), "12345", "utf8");
+    writeFileSync(join(dir, "a", "one.txt"), "123", "utf8");
+    writeFileSync(join(dir, "a", "b", "two.txt"), "1234567", "utf8");
 
-    expect(measurePath(dir)).toEqual({ fileCount: 3, totalBytes: 1010 });
+    expect(measureSyncPath(dir)).toEqual({ fileCount: 3, totalBytes: 15 });
   });
 
-  it("measures an empty directory as holding nothing", () => {
-    expect(measurePath(makeTmpDir())).toEqual({ fileCount: 0, totalBytes: 0 });
+  it("reports an empty directory as present and empty", () => {
+    expect(measureSyncPath(makeTmpDir())).toEqual({
+      fileCount: 0,
+      totalBytes: 0,
+    });
   });
 });

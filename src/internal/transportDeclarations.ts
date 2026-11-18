@@ -14,7 +14,7 @@ import {
   type Harness,
 } from "../utils/harnessSet";
 import { pathsOnlyIn, type DeclaredPath } from "../utils/declaredPaths";
-import { measurePath, type PathSize } from "../utils/pathSize";
+import { measureSyncPath, type SyncPathSize } from "../utils/pathSize";
 import { InternalCommandError } from "./errors";
 import { NUL, git, type GitResult } from "./git";
 import type { ConflictFile } from "./transport";
@@ -163,9 +163,9 @@ export function remoteDeclarationChanges(
 }
 
 export type FirstSyncPath = DeclaredPath &
-  PathSize & { direction: "outgoing" | "incoming" };
+  SyncPathSize & { direction: "outgoing" | "incoming" };
 
-type SizeOf = (path: string) => PathSize | null | Promise<PathSize | null>;
+type SizeOf = (path: string) => SyncPathSize | null | Promise<SyncPathSize | null>;
 
 // The gate listing: each newly declared path, once per direction in which it
 // has something to sync.
@@ -198,7 +198,7 @@ export function changedPathSize(
       .filter(({ status }) => status !== "removed")
       .map(({ path }) => path),
   );
-  return (path) => (changed.has(path) ? measurePath(locate(path)) : null);
+  return (path) => (changed.has(path) ? measureSyncPath(locate(path)) : null);
 }
 
 // The size of a path as a revision holds it, or null when it holds nothing
@@ -207,7 +207,7 @@ export async function sizeAt(
   configDir: string,
   rev: string,
   path: string,
-): Promise<PathSize | null> {
+): Promise<SyncPathSize | null> {
   const listed = await git(configDir, "ls-tree", "-r", "-l", "-z", rev, "--", path);
   if (!listed.ok) return null;
   // Each entry: "<mode> <type> <object> <size>\t<path>".
