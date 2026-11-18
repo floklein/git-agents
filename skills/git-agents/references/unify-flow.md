@@ -13,7 +13,7 @@ Run the transport flow ([transport-flow.md](transport-flow.md)) with one change:
 Run `gather`. The result holds:
 
 - `canonicalVersion`, `core`, `overlays`: the current canonical content (all null/empty on first run).
-- `files[]`: per harness, the parse state (`parsed`, `absent`, `mangled`) and `regions[]` attributing content to `core`, `overlay`, or `unattributed`, each with a `changed` flag and both sides of the comparison.
+- `files[]`: one entry per generated file, identified by overlay id (name a custom harness by its declared `name`, per SKILL.md, "Naming harnesses"), with the parse state (`parsed`, `absent`, `mangled`) and `regions[]` attributing content to `core`, `overlay`, or `unattributed`, each with a `changed` flag and both sides of the comparison.
 - `inputs`: the freshness token; pass it to stage untouched.
 
 ## 3. Draft the merge
@@ -24,6 +24,7 @@ Propose the full result in one pass: a single `core` plus per-harness `overlays`
 - Content that only makes sense for one harness (its model names, its own tool quirks) goes to that harness's overlay.
 - Harness-appended memory (unattributed regions) is real input: classify it like anything else.
 - Obvious duplicates collapse; near-duplicates merge into the clearest phrasing.
+- `overlays` is keyed by the overlay ids `gather` reports; a custom harness's overlay uses its own id. A newly declared instructions file has no markers on its first convergence, so all of it is unattributed: classify it like anything else.
 
 Ask the user **only** about genuinely ambiguous chunks: content you cannot confidently place in core, an overlay, or the bin. On a steady-state run that is usually zero questions; on a first run, a handful. Batch the questions; never walk the user through every line.
 
@@ -31,9 +32,10 @@ Ask the user **only** about genuinely ambiguous chunks: content you cannot confi
 
 Run `stage` with `{"core":"...","overlays":{...},"inputs":<gather.inputs>}`. Write that JSON to a temp file and pass it with `--input-file` (or pipe it via `--input -`): the payload carries multi-line content with backslashes and backticks, which inline `--input` can corrupt through shell quoting, especially on Windows.
 
-- Show every non-empty `diff` from the result verbatim (they cover canonical core, overlays including deletions, and all four generated files).
+- Show every non-empty `diff` from the result verbatim (they cover canonical core, overlays including deletions, and every generated file, a custom harness's instructions file included).
 - Surface every warning: `near-cap` or `over-cap` means the Codex file approaches or exceeds its 32 KiB silent-truncation cap; propose trimming before applying.
 - On `stale-inputs`: something changed since gather; go back to step 2.
+- On `invalid-input` naming an overlay id: the overlay belongs to no declared harness; drop it or move its content, then stage again.
 
 ## 5. Gate, then apply
 

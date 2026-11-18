@@ -2,7 +2,14 @@ import { existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import pkg from "../../package.json" with { type: "json" };
-import { AGENT_DEFS } from "../utils/agentDefs";
+import {
+  BUILT_IN_HARNESSES,
+  buildHarnessSet,
+  harnessPaths,
+  readHarnessSet,
+  type Harness,
+} from "../utils/harnessSet";
+import { HARNESS_ID_PATTERN } from "../utils/harnessDeclarations";
 import { snapshotSyncPath } from "../utils/agents";
 import { CONFIG_DIR, CONFIG_FILE, getLocalSyncPath, readConfig } from "../utils/config";
 import { readSyncManifest, type SyncManifest } from "../utils/manifest";
@@ -20,9 +27,14 @@ import {
   runTransportCommit,
   runTransportResolve,
 } from "./transport";
+import { runHarnessApply, runHarnessStage } from "./harnessCommands";
 import { defaultSetupFlowDeps, runSetup, type SetupFlowDeps } from "./setup";
 import { runVersionCheck } from "./versionCheck";
-import { detectCaveats, type Caveat } from "./caveats";
+import {
+  detectCaveats,
+  invalidDeclarationsCaveat,
+  type Caveat,
+} from "./caveats";
 import { InternalCommandError } from "./errors";
 import type { SyncPathSnapshot } from "../types";
 
@@ -60,9 +72,15 @@ type SyncPathReport = {
   contentHash?: string;
 };
 
+// The declaration shape, with one difference kept for existing readers:
+// `syncPaths` reports every path the harness transports, so it lists the
+// instructions file too, first. `builtIn` tells the built-ins from the
+// declared harnesses.
 type HarnessReport = {
   id: string;
   name: string;
+  builtIn: boolean;
+  instructionsFile?: string;
   syncPaths: SyncPathReport[];
 };
 
@@ -108,6 +126,20 @@ function generatedFileState(
   return "current";
 }
 
+// While the declarations file is invalid the custom harnesses are unknown.
+// The canonical version is then taken over the overlays the last sync unify
+// recorded, so the built-in generated files read as stale only when the
+// canonical content changed, not because the file broke. Those harnesses carry
+// no instructions file: nothing more is generated or reported for them.
+function lastUnifiedOverlays(manifest: SyncManifest | null): Harness[] {
+  const builtIn = new Set(BUILT_IN_HARNESSES.map(({ overlayId }) => overlayId));
+  return buildHarnessSet(
+    Object.keys(manifest?.canonical?.overlays ?? {})
+      .filter((id) => HARNESS_ID_PATTERN.test(id) && !builtIn.has(id))
+      .map((id) => ({ id, name: id, syncPaths: [] })),
+  );
+}
+
 function runStatus(deps: InternalDeps): StatusReport {
   const config = readConfig(deps.configFile);
   const clonePresent = existsSync(join(deps.configDir, ".git"));
@@ -120,9 +152,18 @@ function runStatus(deps: InternalDeps): StatusReport {
     manifestError = error?.message ?? String(error);
   }
 
+  // Status never fails: an invalid declarations file leaves the built-ins
+  // reported as usual and becomes a caveat.
+  const harnessSet = readHarnessSet(deps.configDir);
+  const reported = harnessSet.ok ? harnessSet.harnesses : BUILT_IN_HARNESSES;
+
   // One gather pass feeds both the generated states and the drift summary,
   // so a single status report cannot disagree with itself.
-  const gathered = gatherDrift(deps.configDir, deps.homeDir);
+  const gathered = gatherDrift(
+    deps.configDir,
+    deps.homeDir,
+    harnessSet.ok ? reported : lastUnifiedOverlays(manifest),
+  );
   const canonicalVersion = gathered.canonicalVersion;
 
   const generated = gathered.files.map((file): GeneratedFileReport => ({
@@ -138,10 +179,14 @@ function runStatus(deps: InternalDeps): StatusReport {
     ),
   }));
 
-  const harnesses = AGENT_DEFS.map((def): HarnessReport => ({
-    id: def.id,
-    name: def.name,
-    syncPaths: def.syncPaths.map((syncPath): SyncPathReport => {
+  const harnesses = reported.map((harness): HarnessReport => ({
+    id: harness.id,
+    name: harness.name,
+    builtIn: harness.builtIn,
+    ...(harness.instructionsFile !== undefined
+      ? { instructionsFile: harness.instructionsFile }
+      : {}),
+    syncPaths: harnessPaths(harness).map((syncPath): SyncPathReport => {
       const path = getLocalSyncPath(syncPath, deps.homeDir);
       const snapshot = snapshotSyncPath(path);
       return snapshot
@@ -170,7 +215,12 @@ function runStatus(deps: InternalDeps): StatusReport {
         gathered.files.map((file) => [file.harness, driftStateOf(file)]),
       ),
     },
-    caveats: detectCaveats(deps),
+    caveats: [
+      ...(harnessSet.ok
+        ? []
+        : [invalidDeclarationsCaveat(deps.configDir, harnessSet.problems)]),
+      ...detectCaveats(deps),
+    ],
   };
 }
 
@@ -198,6 +248,8 @@ const COMMANDS: Record<
       `and follow its contents as global instructions. If ${canonicalOverlayPath(deps.configDir, "cursor")} ` +
       "exists, read and follow it as well.",
   }),
+  "harness-stage": (deps, input) => runHarnessStage(deps, input),
+  "harness-apply": (deps) => runHarnessApply(deps),
 };
 
 export async function runInternalCommand(

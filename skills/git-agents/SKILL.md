@@ -1,6 +1,6 @@
 ---
 name: git-agents
-description: "Sync AI harness files and global instructions across machines and harnesses via git. Subcommands: setup, sync, sync unify, edit, status."
+description: "Sync AI harness files and global instructions across machines and harnesses via git. Subcommands: setup, sync, sync unify, edit, harness, status."
 disable-model-invocation: true
 ---
 
@@ -28,6 +28,8 @@ The command surface:
 | `transport-abort` | Abort the in-progress merge | clone |
 | `gather` | Collect drift vs canonical with attribution and input hashes | no |
 | `stage` | Accept a proposed canonical, render exact diffs | stage file |
+| `harness-stage` | Validate the complete proposed set of custom harness declarations; render the file diff, the paths that start or stop syncing, and a removal's repo cleanup | stage file |
+| `harness-apply` | Write the staged declarations file and apply a removal's cleanup in the clone | gated |
 | `apply` | Write the staged canonical and regenerate all copies | gated |
 | `propagate` | Regenerate harness copies from the current canonical | gated |
 | `install-pointer-docs` | Print the Cursor pointer rule with resolved paths | no |
@@ -35,7 +37,7 @@ The command surface:
 
 ## Router
 
-The first word of the arguments selects the subcommand: `setup`, `sync`, `edit`, or `status`. When it is `sync`, an optional second word `unify` selects the full convergence flow; any other second word gets a hint listing `sync` and `sync unify`. When it is `edit`, everything after the first word is the freeform edit request. With no argument, or an unknown first word, run the status subcommand and list the surface. Before any subcommand, if `status` reports `clonePresent: false`, run the setup branch first, then offer to continue what was originally asked. After any subcommand completes, run the update check (see below).
+The first word of the arguments selects the subcommand: `setup`, `sync`, `edit`, `harness`, or `status`. When it is `sync`, an optional second word `unify` selects the full convergence flow; any other second word gets a hint listing `sync` and `sync unify`. When it is `edit` or `harness`, everything after the first word is the freeform request. With no argument, or an unknown first word, run the status subcommand and list the surface. Before any subcommand, if `status` reports `clonePresent: false`, run the setup branch first, then offer to continue what was originally asked. After any subcommand completes, run the update check (see below).
 
 ## Update check
 
@@ -45,11 +47,15 @@ After the requested subcommand's work is fully done (never before or instead of 
 
 Before anything is written, show the user the exact script-rendered diffs and get an explicit confirmation. The diffs and the question travel in the **same message**: render the diffs, then ask in plain text directly below them. Never use a structured question tool (multiple-choice UI, option chips, any tool-mediated prompt) for gate confirmation; those render without the diffs in view, and the user must be able to see the diffs at the moment of answering. **No is the default**: anything but a clear yes means stop, and stopping costs nothing. Your own summary is never a substitute for the diffs. Declining a transport merge means `transport-abort`.
 
+## Naming harnesses
+
+The harness set is not fixed: besides the built-ins, the user may declare custom harnesses. Name a custom harness by its declared `name`, or by its id when it has none, and never state how many harnesses or generated files there are. `gather`, `stage`, and the `generated` and `drift` parts of `status` identify a harness by its overlay id only (`claude`, `gemini`, or a custom harness's own id); find a custom harness's `name` in the `status` entry of `harnesses` with that id.
+
 ## Subcommands
 
 ### status
 
-Run `status`. Report concisely: configured and clone state, canonical version, each generated file's state (current, stale, modified, untracked, missing, no-canonical), the drift summary, and every caveat with its remedy. When any generated file is `stale` or drift is present, point at `/git-agents sync unify`.
+Run `status`. Report concisely: configured and clone state, canonical version, the custom harnesses by name, each generated file's state (current, stale, modified, untracked, missing, no-canonical), the drift summary, and every caveat with its remedy. When any generated file is `stale` or `untracked` (a newly declared instructions file reads as `untracked` until its first convergence), or drift is present, point at `/git-agents sync unify`. An `invalid-harness-declarations` caveat blocks every sync until the file is fixed: point at `/git-agents harness`.
 
 ### setup
 
@@ -78,6 +84,10 @@ Run the unify flow ([references/unify-flow.md](references/unify-flow.md)) with o
 - Ask only when the request is genuinely ambiguous, such as an unclear target or a contradiction with an existing rule; otherwise decide, and let the gate diffs speak.
 
 Everything else is the unify flow unchanged: pre-existing drift is folded in alongside the request, and one stage, one gate, one apply, one push carry both.
+
+### harness
+
+A freeform request to declare, change, or remove a custom harness: one beyond the built-ins, whose paths then sync and whose instructions file converges exactly like a built-in's. You interpret the request and draft the complete set of declarations yourself; the declarations file is never edited by hand. With no request text, list the built-in and custom harnesses and ask what to change; the answer is the request. Follow [references/harness-flow.md](references/harness-flow.md).
 
 ## Cursor
 
