@@ -10,46 +10,52 @@ import { z } from "zod";
 import { unifiedDiff } from "../utils/textdiff";
 import { SYNC_MANIFEST_FILE } from "../utils/manifest";
 import { InternalCommandError, invalidInputError } from "../internal/errors";
+import { requireHarnessSet } from "../utils/harnessSet";
 import { CODEX_CAP_BYTES, CODEX_NEAR_CAP_BYTES } from "./limits";
 import {
   CANONICAL_DIR,
-  CANONICAL_HARNESSES,
   CANONICAL_CORE,
-  GENERATED_TARGETS,
   canonicalCorePath,
+  canonicalOverlayIds,
   canonicalOverlayPath,
   computeCanonicalVersion,
+  generatedTargets,
   propagateCanonical,
   readCanonical,
   renderGeneratedFile,
   type CanonicalContent,
-  type CanonicalHarness,
+  type CanonicalOverlays,
   type PropagateResult,
 } from "./canonical";
 import { gatherDrift, type GatherResult } from "./gather";
 
 export const STAGE_FILE = ".git-agents-stage.json";
 
-const HarnessSchema = z.enum(["claude", "codex", "gemini", "opencode", "cursor"]);
-
 const InputsSchema = z.object({
   canonicalVersion: z.string().nullable(),
   fileHashes: z.record(z.string().nullable()),
 });
 
-const StageInputSchema = z.object({
-  core: z.string(),
-  overlays: z.record(HarnessSchema, z.string()).optional(),
-  inputs: InputsSchema,
-});
+// An overlay may only be keyed by an overlay id of the harness set, which is
+// read per call, so the input schema is built per call too.
+function stageInputSchema(overlayIds: string[]) {
+  return z.object({
+    core: z.string(),
+    overlays: z
+      .record(z.enum(overlayIds as [string, ...string[]]), z.string())
+      .optional(),
+    inputs: InputsSchema,
+  });
+}
 
-export type StageInput = z.infer<typeof StageInputSchema>;
+export type StageInput = z.infer<ReturnType<typeof stageInputSchema>>;
 
 const StageFileSchema = z.object({
   version: z.literal(1),
   proposal: z.object({
     core: z.string(),
-    overlays: z.record(HarnessSchema, z.string()),
+    // The ids are checked against the harness set when the file is applied.
+    overlays: z.record(z.string(), z.string()),
   }),
   proposalVersion: z.string(),
   inputs: InputsSchema,
@@ -94,9 +100,9 @@ function assertInputsFresh(
 }
 
 function buildProposal(input: StageInput): CanonicalContent {
-  const overlays: Partial<Record<CanonicalHarness, string>> = {};
+  const overlays: CanonicalOverlays = {};
   for (const [harness, content] of Object.entries(input.overlays ?? {})) {
-    if (content.trim() !== "") overlays[harness as CanonicalHarness] = content;
+    if (content !== undefined && content.trim() !== "") overlays[harness] = content;
   }
   return {
     core: input.core,
@@ -110,15 +116,18 @@ export function runStage(
   homeDir: string,
   rawInput: unknown,
 ): StageResult {
-  const parsed = StageInputSchema.safeParse(rawInput);
+  const harnesses = requireHarnessSet(configDir);
+  const overlayIds = canonicalOverlayIds(harnesses);
+
+  const parsed = stageInputSchema(overlayIds).safeParse(rawInput);
   if (!parsed.success) throw invalidInputError("stage", parsed.error);
   const input = parsed.data;
 
-  const current = gatherDrift(configDir, homeDir);
+  const current = gatherDrift(configDir, homeDir, harnesses);
   assertInputsFresh(input.inputs, current.inputs);
 
   const proposal = buildProposal(input);
-  const existingCanonical = readCanonical(configDir);
+  const existingCanonical = readCanonical(configDir, harnesses);
 
   const files: StagedFileDiff[] = [];
   const corePath = `${CANONICAL_DIR}/${CANONICAL_CORE}`;
@@ -127,7 +136,7 @@ export function runStage(
     changed: (existingCanonical?.core ?? "") !== proposal.core,
     diff: unifiedDiff(existingCanonical?.core ?? "", proposal.core, corePath),
   });
-  for (const harness of CANONICAL_HARNESSES) {
+  for (const harness of overlayIds) {
     const before = existingCanonical?.overlays[harness] ?? "";
     const after = proposal.overlays[harness] ?? "";
     if (before === "" && after === "") continue;
@@ -140,7 +149,7 @@ export function runStage(
   }
 
   const warnings: StageWarning[] = [];
-  for (const target of GENERATED_TARGETS) {
+  for (const target of generatedTargets(harnesses)) {
     const rendered = renderGeneratedFile(proposal, target.harness);
     const currentFile = current.files.find((f) => f.harness === target.harness);
     // Normalized like gather, so the gate cannot show drift that the
@@ -194,6 +203,9 @@ export function runStage(
 export type ApplyResult = PropagateResult & { appliedVersion: string };
 
 export function runApply(configDir: string, homeDir: string): ApplyResult {
+  const harnesses = requireHarnessSet(configDir);
+  const overlayIds = canonicalOverlayIds(harnesses);
+
   const stagePath = join(configDir, STAGE_FILE);
   if (!existsSync(stagePath)) {
     throw new InternalCommandError(
@@ -220,8 +232,17 @@ export function runApply(configDir: string, homeDir: string): ApplyResult {
   }
   const staged: StageFileContent = stagedParse.data;
 
-  const current = gatherDrift(configDir, homeDir);
+  const current = gatherDrift(configDir, homeDir, harnesses);
   assertInputsFresh(staged.inputs, current.inputs);
+  const undeclared = Object.keys(staged.proposal.overlays).filter(
+    (harness) => !overlayIds.includes(harness),
+  );
+  if (undeclared.length > 0) {
+    throw new InternalCommandError(
+      "stale-inputs",
+      `The harness set changed since staging: an overlay is staged for ${undeclared.join(", ")}, which is no longer declared. Run gather again and re-stage.`,
+    );
+  }
 
   mkdirSync(join(configDir, CANONICAL_DIR, "overlays"), { recursive: true });
   const corePath = canonicalCorePath(configDir);
@@ -231,7 +252,7 @@ export function runApply(configDir: string, homeDir: string): ApplyResult {
   if (existingCore !== staged.proposal.core) {
     writeFileSync(corePath, staged.proposal.core, "utf8");
   }
-  for (const harness of CANONICAL_HARNESSES) {
+  for (const harness of overlayIds) {
     const overlayPath = canonicalOverlayPath(configDir, harness);
     const overlay = staged.proposal.overlays[harness];
     if (overlay !== undefined && overlay.trim() !== "") {
@@ -246,7 +267,7 @@ export function runApply(configDir: string, homeDir: string): ApplyResult {
     }
   }
 
-  const result = propagateCanonical(configDir, homeDir);
+  const result = propagateCanonical(configDir, homeDir, harnesses);
   rmSync(stagePath, { force: true });
 
   return { ...result, appliedVersion: result.canonicalVersion };

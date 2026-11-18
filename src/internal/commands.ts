@@ -133,9 +133,14 @@ function runStatus(deps: InternalDeps): StatusReport {
     manifestError = error?.message ?? String(error);
   }
 
+  // Status never fails: an invalid declarations file leaves the built-ins
+  // reported as usual and becomes a caveat.
+  const harnessSet = readHarnessSet(deps.configDir);
+  const reported = harnessSet.ok ? harnessSet.harnesses : BUILT_IN_HARNESSES;
+
   // One gather pass feeds both the generated states and the drift summary,
   // so a single status report cannot disagree with itself.
-  const gathered = gatherDrift(deps.configDir, deps.homeDir);
+  const gathered = gatherDrift(deps.configDir, deps.homeDir, reported);
   const canonicalVersion = gathered.canonicalVersion;
 
   const generated = gathered.files.map((file): GeneratedFileReport => ({
@@ -150,11 +155,6 @@ function runStatus(deps: InternalDeps): StatusReport {
       manifest?.generated?.[file.harness],
     ),
   }));
-
-  // Status never fails: an invalid declarations file leaves the built-ins
-  // reported as usual and becomes a caveat.
-  const harnessSet = readHarnessSet(deps.configDir);
-  const reported = harnessSet.ok ? harnessSet.harnesses : BUILT_IN_HARNESSES;
 
   const harnesses = reported.map((harness): HarnessReport => ({
     id: harness.id,
