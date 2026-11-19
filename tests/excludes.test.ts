@@ -68,6 +68,14 @@ describe("the built-in excludes", () => {
     ".claude/skills/synced/some-skill/SKILL.md",
     ".agents/skills/.staging/tmp",
     ".claude/skills/review/.DS_Store",
+    ".claude/skills/review/._SKILL.md",
+    ".agents/skills/pdf/Thumbs.db",
+    ".agents/skills/pdf/desktop.ini",
+    ".agents/skills/pdf/node_modules/pdf-lib/index.js",
+    ".agents/skills/pdf/scripts/__pycache__/fill.cpython-312.pyc",
+    ".agents/skills/pdf/.venv/bin/python",
+    ".agents/skills/cloned/.git/HEAD",
+    ".codex/skills/.system/skill-creator/SKILL.md",
     ".claude/skills/.review.git-agents-incoming-0b8f7a4e-0000-4000-8000-000000000000",
     ".claude/.skills.git-agents-backup-0b8f7a4e-0000-4000-8000-000000000000/x",
   ])("exclude %s", (path) => {
@@ -81,6 +89,9 @@ describe("the built-in excludes", () => {
     ".claude/CLAUDE.md",
     ".git-agents-harnesses.json",
     ".claude/skills/trash/SKILL.md",
+    ".claude/skills/git-agents/SKILL.md",
+    ".claude/skills/review/.gitignore",
+    ".codex/skills/system/SKILL.md",
   ])("keep %s", (path) => {
     expect(builtIn(path)).toBe(false);
   });

@@ -52,6 +52,16 @@ Close with what traveled in each direction and how each conflict was settled. If
 
 ## Excludes
 
-Some folders inside synced paths are managed by a tool on each machine and are never synced, in either direction: the built-in list covers `.claude/skills/synced` (Claude Code's claude.ai skill sync), any `.trash` and `.staging` folder, `.DS_Store`, and git-agents' own temporary `.<name>.git-agents-*` names. Excluded files are never copied into the repo, never written to a home directory, and never deleted from one: a sync that replaces or removes a synced folder keeps the excluded entries inside it.
+Some files inside synced paths belong to one machine, and are never synced in either direction. They are never copied into the repo, never written to a home directory, and never overwritten or deleted there. When a synced folder is replaced or removed, the excluded entries inside it stay, and a folder holding only excluded entries counts as absent. The built-in list:
 
-Users add their own excludes in `.git-agents-excludes` at the root of the sync repo clone (`~/.git-agents/`): one pattern per line, `#` for comments. A pattern without a `/` matches that name at any depth (`notes`, `*.log`); a pattern with a `/` matches from the home directory (`.claude/skills/local-only`); `*` and `?` match within a name, `**` any number of folders. The file is committed with the next sync and applies on every machine. When the user asks to stop syncing something inside a synced folder, propose the pattern, add it on a yes, and run the sync: the gate lists the paths it drops from the repo under `excluded`.
+- `.claude/skills/synced`: Claude Code's claude.ai skill sync (manifest, staging, the synced copies).
+- Any `.trash` or `.staging` folder, such as Claude Code's `.claude/skills/.trash`.
+- `.codex/skills/.system`: Codex's bundled system skills.
+- Any `node_modules`, `__pycache__`, or `.venv` folder: what a skill installs or builds for one machine.
+- Any `.git` folder: a skill cloned with git syncs its files, not its repository.
+- `.DS_Store`, `._*`, `Thumbs.db`, `desktop.ini`: operating-system files.
+- git-agents' own temporary `.<name>.git-agents-incoming-*` and `.<name>.git-agents-backup-*` names.
+
+Users add their own excludes in `.git-agents-excludes` at the root of the sync repo clone (`~/.git-agents/`): one pattern per line, `#` for comments. A pattern without a `/` matches that name at any depth (`notes`, `*.log`). A pattern with a `/` matches from the home directory (`.claude/skills/local-only`). `*` and `?` match within a name, `**` any number of folders, and matching ignores case. The file is committed with the next sync and applies on every machine. It is the one file in the clone you may edit, and only on the user's request. When the user asks to stop syncing something inside a synced folder, propose the pattern and add it on a yes. Then run the sync, whose gate lists what it drops from the repo under `excluded`. To stop syncing a whole path, change the harness declarations instead (`/git-agents harness`).
+
+`status` reports file counts and hashes without excluded entries.

@@ -42,7 +42,7 @@ If you skip step 2, any other subcommand routes you into setup first.
 | Subcommand | What it does |
 |---|---|
 | `/git-agents setup` | One-time onboarding: remote choice, repo creation, clone. Safe to re-run. |
-| `/git-agents sync` | Transport: your configs travel to and from the repo independently, git-native. Conflicts are resolved by the agent (reconciled when compatible, interviewed when contradictory). The canonical is never involved. |
+| `/git-agents sync` | Transport: your configs travel to and from the repo independently, git-native. Conflicts are resolved by the agent (reconciled when compatible, interviewed when contradictory), including a file deleted on one machine and edited on another, or a skill folder replaced by a link. Paths deleted on both sides and conflicts on [excluded files](#never-synced) settle themselves. The canonical is never involved. |
 | `/git-agents sync unify` | The full convergence flow: transport, then merge drift into the canonical, regenerate every harness file, and push once. |
 | `/git-agents edit <request>` | Freeform edit of your global instructions: the agent interprets the request (add, reword, remove), drafts it into the canonical in the right section, and runs the full convergence flow around it. |
 | `/git-agents harness <request>` | Declare, change, or remove a custom harness: the agent drafts the declarations, shows the exact diff of the declarations file and the paths that start or stop syncing, then offers to sync. |
@@ -83,9 +83,41 @@ The canonical directory itself is part of the sync repo and needs no entry here.
 
 Generated state, general settings, authentication data, caches, sessions, and managed installs outside the paths above are excluded. Everything inside a selected directory is treated as portable content, so keep machine-specific files outside it.
 
-Inside the selected directories, folders that a tool manages per machine are never synced, in either direction, and sync never overwrites or deletes them: `~/.claude/skills/synced/` (Claude Code's claude.ai skill sync), any `.trash/` or `.staging/` folder, `.DS_Store` files, and git-agents' own temporary `.<name>.git-agents-*` names. To exclude more, list patterns in `.git-agents-excludes` at the root of the sync repo clone (`~/.git-agents/`), one per line (`#` for comments): a name without a `/` matches at any depth (`notes`, `*.log`), a path with a `/` matches from your home directory (`.claude/skills/local-only`). The file is synced, so every machine applies it. Excluded files an earlier version committed leave the repo on the next sync; they stay in every home directory.
-
 On Windows, a selected leaf directory junction syncs the contents of its target. Pulling into an existing junction updates that target without replacing the junction. POSIX executable state is preserved for synced files.
+
+### Never synced
+
+Inside the synced directories, some files belong to one machine: a tool writes them, a skill builds them, or the operating system leaves them. They are excluded, in both directions. Sync never copies them into the repo, never writes them into a home directory, and never overwrites or deletes them there. When a synced folder is replaced or removed, the excluded files inside it stay. A folder that holds nothing but excluded files counts as absent.
+
+| Excluded | Why |
+|---|---|
+| `~/.claude/skills/synced/` | Claude Code's claude.ai skill sync: its manifest, staging area, and copies of your claude.ai skills, rebuilt by each machine's app |
+| `.trash/` anywhere | Trash folders, such as Claude Code's `~/.claude/skills/.trash/` for removed skills |
+| `.staging/` anywhere | Staging areas of tools that write in steps |
+| `~/.codex/skills/.system/` | Codex's bundled system skills, rewritten on every Codex update (only reached by a custom harness that syncs `~/.codex/skills`) |
+| `node_modules/`, `__pycache__/`, `.venv/` anywhere | Dependencies and caches a skill installs or builds for one machine's platform |
+| `.git/` anywhere | Repository metadata of a skill cloned with git; the skill's files still sync |
+| `.DS_Store`, `._*`, `Thumbs.db`, `desktop.ini` | Files macOS and Windows leave in folders |
+| `.<name>.git-agents-incoming-*`, `.<name>.git-agents-backup-*` | git-agents' own temporary names, left over by an interrupted sync |
+
+Other folders the harnesses manage, such as Cursor's built-in skills (`~/.cursor/skills-cursor/`), Gemini CLI extensions (`~/.gemini/extensions/`), and OpenCode's plugin installs, are outside the synced paths and were never synced.
+
+To exclude more, list patterns in `.git-agents-excludes` at the root of the sync repo clone (`~/.git-agents/.git-agents-excludes`), one per line, `#` for comments:
+
+```gitignore
+# Notes I keep next to skills on this machine only
+notes
+*.log
+.claude/skills/local-only
+```
+
+- A pattern without a `/` matches that name at any depth.
+- A pattern with a `/` matches from your home directory.
+- `*` and `?` match within a name, and `**` matches any number of folders. Matching ignores case.
+
+The file travels with the next sync, so every machine applies the same list. A list kept on one machine only would let the other machines send the excluded files back. Or ask the agent ("stop syncing the notes folders in my skills"): it proposes the pattern and runs the sync.
+
+**Cleanup of the repo.** Excluded files that an earlier version committed, or that were committed before you added an exclude, leave the repo on the next sync. The confirmation lists them under `excluded`. The files stay in every home directory. Machines still on an older version that keep committing them get their conflicts on those paths settled automatically.
 
 ## Custom harnesses
 

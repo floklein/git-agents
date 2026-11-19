@@ -12,7 +12,7 @@ You orchestrate; deterministic scripts do every file operation. Run them with:
 npx -y git-agents@latest --internal <command> [--input <json> | --input - | --input-file <path>]
 ```
 
-Every command prints exactly one JSON envelope: `{"ok":true,"result":...}` or `{"ok":false,"error":{"code":"...","message":"..."}}`. Relay error messages with their remedy; never edit synced files by hand; never write anything except through the gate below.
+Every command prints exactly one JSON envelope: `{"ok":true,"result":...}` or `{"ok":false,"error":{"code":"...","message":"..."}}`. Relay error messages with their remedy; never edit synced files by hand (the excludes file `.git-agents-excludes` is the one exception, on the user's request); never write anything except through the gate below.
 
 Input channels: inline `--input <json>` is fine for small payloads; `--input-file <path>` reads the JSON from a file and `--input -` reads it from stdin, so the payload never crosses shell quoting. For any payload carrying multi-line content, backslashes, or backticks (`stage` above all, especially on Windows), write the JSON to a temp file and pass `--input-file`.
 
@@ -66,7 +66,7 @@ Run `status`. Report concisely: configured and clone state, canonical version, t
 
 ### sync
 
-Transport only: configs travel to and from the repo independently; the canonical is never involved. Follow [references/transport-flow.md](references/transport-flow.md).
+Transport only: configs travel to and from the repo independently; the canonical is never involved. Follow [references/transport-flow.md](references/transport-flow.md). Machine-specific files inside synced folders are excluded and never travel; a request to stop syncing something inside a synced folder is an exclude, handled in its "Excludes" section.
 
 ### sync unify
 

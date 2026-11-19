@@ -22,7 +22,21 @@ export const BUILT_IN_EXCLUDES: readonly string[] = [
   ".trash",
   // Staging areas of tools that write in steps.
   ".staging",
+  // Codex's bundled system skills, which Codex rewrites on every update.
+  ".codex/skills/.system",
+  // What a skill installs or builds where it runs: dependencies and caches
+  // tied to one machine's platform and runtime, never portable content.
+  "node_modules",
+  "__pycache__",
+  ".venv",
+  // A skill cloned with git: its repository metadata is per machine, and git
+  // cannot commit a repository inside the sync repo anyway.
+  ".git",
+  // Files the operating system leaves in folders.
   ".DS_Store",
+  "._*",
+  "Thumbs.db",
+  "desktop.ini",
   // The temporary names mirroring itself uses beside a path it replaces.
   ".*.git-agents-incoming-*",
   ".*.git-agents-backup-*",
