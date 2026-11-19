@@ -11,6 +11,7 @@ import {
 } from "../utils/harnessSet";
 import { HARNESS_ID_PATTERN } from "../utils/harnessDeclarations";
 import { snapshotSyncPath } from "../utils/agents";
+import { excludesWithin, loadExcludes } from "../utils/excludes";
 import { CONFIG_DIR, CONFIG_FILE, getLocalSyncPath, readConfig } from "../utils/config";
 import { readSyncManifest, type SyncManifest } from "../utils/manifest";
 import {
@@ -67,6 +68,8 @@ type SyncPathReport = {
   syncPath: string;
   path: string;
   present: boolean;
+  // The whole path matches an exclude: it is not synced, whatever is there.
+  excluded?: true;
   kind?: SyncPathSnapshot["kind"];
   fileCount?: number;
   contentHash?: string;
@@ -179,6 +182,7 @@ function runStatus(deps: InternalDeps): StatusReport {
     ),
   }));
 
+  const excludes = loadExcludes(deps.configDir);
   const harnesses = reported.map((harness): HarnessReport => ({
     id: harness.id,
     name: harness.name,
@@ -188,7 +192,10 @@ function runStatus(deps: InternalDeps): StatusReport {
       : {}),
     syncPaths: harnessPaths(harness).map((syncPath): SyncPathReport => {
       const path = getLocalSyncPath(syncPath, deps.homeDir);
-      const snapshot = snapshotSyncPath(path);
+      if (excludes(syncPath)) {
+        return { syncPath, path, present: existsSync(path), excluded: true };
+      }
+      const snapshot = snapshotSyncPath(path, excludesWithin(excludes, syncPath));
       return snapshot
         ? {
             syncPath,

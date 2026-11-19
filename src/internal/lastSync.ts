@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { snapshotSyncPath } from "../utils/agents";
 import { getLocalSyncPath } from "../utils/config";
 import { pathKey } from "../utils/pathKey";
+import { excludesWithin, type ExcludeMatcher } from "../utils/excludes";
 
 // What the home directory held after this machine's last completed sync.
 // Deletion detection needs exactly this per-machine memory: the home dir
@@ -34,12 +35,16 @@ function writeRecord(configDir: string, paths: string[]): void {
 export function writeLastSyncedPaths(
   deps: { homeDir: string; configDir: string },
   syncPaths: string[],
+  excludes?: ExcludeMatcher,
 ): void {
   writeRecord(
     deps.configDir,
     syncPaths.filter(
       (syncPath) =>
-        snapshotSyncPath(getLocalSyncPath(syncPath, deps.homeDir)) !== null,
+        snapshotSyncPath(
+          getLocalSyncPath(syncPath, deps.homeDir),
+          excludes && excludesWithin(excludes, syncPath),
+        ) !== null,
     ),
   );
 }
