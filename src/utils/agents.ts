@@ -22,6 +22,7 @@ import {
 } from "path";
 import type { SyncPathSnapshot, SyncPathStatus } from "../types";
 import { errorMessage } from "./errors";
+import type { PathFilter } from "./excludes";
 
 function normalizedRelativePath(root: string, path: string): string {
   const value = relative(root, path);
@@ -35,6 +36,7 @@ function hashPath(
   count: { files: number },
   followDirectoryLink = false,
   ancestorDirectories = new Set<string>(),
+  exclude?: PathFilter,
 ): void {
   const linkStat = lstatSync(path);
   const directoryLinkTarget = windowsDirectoryLinkTarget(path, linkStat);
@@ -79,9 +81,10 @@ function hashPath(
     try {
       const children = readdirSync(path)
         .sort((a, b) => a < b ? -1 : a > b ? 1 : 0)
-        .map((name) => resolve(path, name));
+        .map((name) => resolve(path, name))
+        .filter((child) => !isLeftOut(root, child, exclude));
       for (const child of children) {
-        hashPath(root, child, hash, count, false, ancestorDirectories);
+        hashPath(root, child, hash, count, false, ancestorDirectories, exclude);
       }
     } finally {
       ancestorDirectories.delete(canonicalDirectory);
@@ -109,7 +112,51 @@ function windowsDirectoryLinkTarget(
   }
 }
 
-export function snapshotSyncPath(path: string): SyncPathSnapshot | null {
+function isRealDirectory(path: string): boolean {
+  try {
+    return lstatSync(path).isDirectory();
+  } catch (error: any) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return false;
+    throw error;
+  }
+}
+
+/**
+ * Whether a directory holds excluded entries and nothing else of its own:
+ * every entry is excluded, or such a directory in turn. Sync treats it as
+ * absent, so that excluded content alone never makes a path exist on one
+ * side only. An empty directory is not vacant: it is synced as it always was.
+ */
+function isVacant(root: string, path: string, exclude: PathFilter): boolean {
+  if (!isRealDirectory(path)) return false;
+  const names = readdirSync(path);
+  return names.length > 0 && names.every((name) => {
+    const child = resolve(path, name);
+    return exclude(normalizedRelativePath(root, child)) ||
+      isVacant(root, child, exclude);
+  });
+}
+
+/** Whether sync leaves an entry below `root` out: excluded, or vacant. */
+export function isLeftOut(
+  root: string,
+  path: string,
+  exclude: PathFilter | undefined,
+): boolean {
+  if (!exclude) return false;
+  return exclude(normalizedRelativePath(root, path)) ||
+    isVacant(root, path, exclude);
+}
+
+/**
+ * The state of a sync path, or null when nothing is there. With `exclude`,
+ * excluded entries below the path are left out, and a directory holding
+ * nothing but excluded entries reads as absent.
+ */
+export function snapshotSyncPath(
+  path: string,
+  exclude?: PathFilter,
+): SyncPathSnapshot | null {
   let stat;
   try {
     stat = lstatSync(path);
@@ -117,11 +164,20 @@ export function snapshotSyncPath(path: string): SyncPathSnapshot | null {
     if (error?.code === "ENOENT") return null;
     throw error;
   }
+  if (exclude && isVacant(path, path, exclude)) return null;
 
   const directoryLinkTarget = windowsDirectoryLinkTarget(path, stat);
   const hash = createHash("sha256");
   const count = { files: 0 };
-  hashPath(path, path, hash, count, directoryLinkTarget !== null);
+  hashPath(
+    path,
+    path,
+    hash,
+    count,
+    directoryLinkTarget !== null,
+    new Set(),
+    exclude,
+  );
 
   const kind = directoryLinkTarget
     ? "directory"
@@ -311,6 +367,94 @@ function removePath(path: string): void {
   });
 }
 
+/**
+ * Removes everything below `path` that `exclude` does not cover, keeping the
+ * excluded entries and the directories that lead to them. A directory left
+ * empty goes too, `path` included.
+ */
+function removeUnexcluded(root: string, path: string, exclude: PathFilter): void {
+  if (!pathExists(path)) return;
+  if (!isRealDirectory(path)) {
+    removePath(path);
+    return;
+  }
+  for (const name of readdirSync(path)) {
+    const child = resolve(path, name);
+    if (exclude(normalizedRelativePath(root, child))) continue;
+    removeUnexcluded(root, child, exclude);
+  }
+  if (readdirSync(path).length === 0) removePath(path);
+}
+
+/**
+ * Copies the excluded entries of the directory being replaced into its
+ * replacement, at the same place, so that replacing a synced directory never
+ * loses what sync leaves alone. An entry whose place the replacement holds
+ * by a file or a link is not carried: nothing is written through a link.
+ */
+function carryExcluded(
+  root: string,
+  path: string,
+  replacement: string,
+  exclude: PathFilter,
+): void {
+  if (!isRealDirectory(path)) return;
+  for (const name of readdirSync(path)) {
+    const child = resolve(path, name);
+    const relativePath = normalizedRelativePath(root, child);
+    if (!exclude(relativePath)) {
+      carryExcluded(root, child, replacement, exclude);
+      continue;
+    }
+    const segments = relativePath.split("/");
+    let parent = replacement;
+    let placeable = true;
+    for (const segment of segments.slice(0, -1)) {
+      parent = join(parent, segment);
+      if (!pathExists(parent)) mkdirSync(parent);
+      else if (!isRealDirectory(parent)) {
+        placeable = false;
+        break;
+      }
+    }
+    const target = join(parent, segments[segments.length - 1]!);
+    if (!placeable || pathExists(target)) continue;
+    cpSync(child, target, {
+      recursive: true,
+      force: false,
+      dereference: false,
+      verbatimSymlinks: true,
+    });
+  }
+}
+
+/**
+ * Deletes the excluded entries below `root`, a file or a directory, and
+ * returns their paths relative to it, `/`-separated, outermost only. For a
+ * copy of the sync repo, never for the home directory.
+ */
+export function removeExcludedEntries(
+  root: string,
+  exclude: PathFilter,
+): string[] {
+  const removed: string[] = [];
+  const visit = (path: string): void => {
+    if (!isRealDirectory(path)) return;
+    for (const name of readdirSync(path).sort()) {
+      const child = resolve(path, name);
+      const relativePath = normalizedRelativePath(root, child);
+      if (exclude(relativePath)) {
+        removePath(child);
+        removed.push(relativePath);
+      } else {
+        visit(child);
+      }
+    }
+  };
+  visit(root);
+  return removed;
+}
+
 export function mirrorSyncPath(
   fromPath: string,
   toPath: string,
@@ -320,14 +464,18 @@ export function mirrorSyncPath(
     source: SyncPathSnapshot | null;
     destination: SyncPathSnapshot | null;
   },
+  exclude?: PathFilter,
 ): void {
   if (comparablePath(fromPath) === comparablePath(toPath)) return;
+  // With `exclude`, excluded entries are neither copied from the source nor
+  // touched in the destination: they stay where they are, on either side.
+  const snap = (path: string) => snapshotSyncPath(path, exclude);
 
   if (fromBasePath) assertSafeSyncPath(fromBasePath, fromPath);
   if (toBasePath) assertSafeSyncPath(toBasePath, toPath);
 
-  const source = snapshotSyncPath(fromPath);
-  const destination = snapshotSyncPath(toPath);
+  const source = snap(fromPath);
+  const destination = snap(toPath);
   if (
     reviewedSnapshots &&
     compareSyncPathSnapshots(reviewedSnapshots.source, source) !== "unchanged"
@@ -367,19 +515,20 @@ export function mirrorSyncPath(
 
   if (!source) {
     if (
-      compareSyncPathSnapshots(source, snapshotSyncPath(fromPath)) !==
+      compareSyncPathSnapshots(source, snap(fromPath)) !==
       "unchanged"
     ) {
       throw new Error(`Source changed while syncing: ${fromPath}`);
     }
     if (
-      compareSyncPathSnapshots(destination, snapshotSyncPath(toPath)) !==
+      compareSyncPathSnapshots(destination, snap(toPath)) !==
       "unchanged"
     ) {
       throw new Error(`Destination changed while syncing: ${toPath}`);
     }
     if (toBasePath) assertSafeSyncPath(toBasePath, toPath);
-    removePath(toPath);
+    if (exclude) removeUnexcluded(toPath, toPath, exclude);
+    else removePath(toPath);
     return;
   }
 
@@ -426,11 +575,18 @@ export function mirrorSyncPath(
       force: true,
       dereference: false,
       verbatimSymlinks: true,
+      ...(exclude
+        ? {
+            filter: (path: string) =>
+              comparablePath(path) === comparablePath(copySourcePath) ||
+              !isLeftOut(copySourcePath, path, exclude),
+          }
+        : {}),
     });
 
-    const copiedSource = snapshotSyncPath(temporaryPath);
-    const currentSource = snapshotSyncPath(fromPath);
-    const currentDestination = snapshotSyncPath(toPath);
+    const copiedSource = snap(temporaryPath);
+    const currentSource = snap(fromPath);
+    const currentDestination = snap(toPath);
     if (
       compareSyncPathSnapshots(source, copiedSource) !== "unchanged" ||
       compareSyncPathSnapshots(source, currentSource) !== "unchanged"
@@ -484,6 +640,9 @@ export function mirrorSyncPath(
       ) {
         throw new Error(`Destination junction changed while syncing: ${toPath}`);
       }
+    }
+    if (exclude && source.kind === "directory") {
+      carryExcluded(installPath, installPath, temporaryPath, exclude);
     }
     if (pathExists(installPath)) {
       backupPath = uniqueSiblingPath(installPath, "backup");

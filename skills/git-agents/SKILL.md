@@ -23,7 +23,7 @@ The command surface:
 | `status` | Config, canonical version, generated states, drift, caveats | no |
 | `setup` | Onboarding: remote choice, repo creation, clone | clone + config |
 | `transport-begin` | Mirror local files into the clone, commit, merge from origin; reports clean changes or conflicts | clone |
-| `transport-resolve` | Write resolved contents for conflicted files | clone |
+| `transport-resolve` | Settle conflicted files: contents, a side (a deleted side deletes), or a deletion; the whole batch is checked first | clone |
 | `transport-commit` | Complete the merge, mirror the result home, push (`{"deferPush":true}` skips the push) | gated |
 | `transport-abort` | Abort the in-progress merge | clone |
 | `gather` | Collect drift vs canonical with attribution and input hashes | no |

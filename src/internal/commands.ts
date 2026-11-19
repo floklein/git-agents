@@ -11,6 +11,7 @@ import {
 } from "../utils/harnessSet";
 import { HARNESS_ID_PATTERN } from "../utils/harnessDeclarations";
 import { snapshotSyncPath } from "../utils/agents";
+import { excludesWithin, loadExcludes } from "../utils/excludes";
 import { CONFIG_DIR, CONFIG_FILE, getLocalSyncPath, readConfig } from "../utils/config";
 import { readSyncManifest, type SyncManifest } from "../utils/manifest";
 import {
@@ -179,6 +180,7 @@ function runStatus(deps: InternalDeps): StatusReport {
     ),
   }));
 
+  const excludes = loadExcludes(deps.configDir);
   const harnesses = reported.map((harness): HarnessReport => ({
     id: harness.id,
     name: harness.name,
@@ -188,7 +190,9 @@ function runStatus(deps: InternalDeps): StatusReport {
       : {}),
     syncPaths: harnessPaths(harness).map((syncPath): SyncPathReport => {
       const path = getLocalSyncPath(syncPath, deps.homeDir);
-      const snapshot = snapshotSyncPath(path);
+      const snapshot = excludes(syncPath)
+        ? null
+        : snapshotSyncPath(path, excludesWithin(excludes, syncPath));
       return snapshot
         ? {
             syncPath,

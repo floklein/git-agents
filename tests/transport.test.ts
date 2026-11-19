@@ -1,10 +1,13 @@
 import { execFileSync } from "node:child_process";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -896,6 +899,8 @@ describe("transport with custom harnesses", () => {
         base: null,
         local: "dsh instructions from B\n",
         remote: "dsh instructions from A, longer\n",
+        localDeleted: false,
+        remoteDeleted: false,
       },
     ]);
     expect(begin.outgoing).toEqual([
@@ -1720,4 +1725,511 @@ describe("transport with custom harnesses", () => {
       expect(readTree(a.homeDir)).toEqual(homeBefore);
     }, 90000);
   });
+});
+
+describe("transport conflicts on deleted paths", () => {
+  const SKILL = ".claude/skills/review/SKILL.md";
+
+  // A synced skill both machines have, then a change of A's that B has not
+  // pulled yet.
+  async function divergeOn(
+    changeOnA: (a: InternalDeps) => void,
+    changeOnB: (b: InternalDeps) => void,
+  ): Promise<{ a: InternalDeps; b: InternalDeps }> {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeHome(a, SKILL, "base\n");
+    writeHome(a, ".claude/skills/other/SKILL.md", "other\n");
+    await fullSync(a);
+    const b = makeMachine(bare);
+    await fullSync(b);
+    changeOnA(a);
+    await fullSync(a);
+    changeOnB(b);
+    return { a, b };
+  }
+
+  const homePath = (deps: InternalDeps, path: string) =>
+    join(deps.homeDir, ...path.split("/"));
+
+  it("says which side deleted the path, and deletes it when that side is picked", async () => {
+    const { a, b } = await divergeOn(
+      (a) => rmSync(homePath(a, ".claude/skills/review"), { recursive: true }),
+      (b) => writeHome(b, SKILL, "edited on B\n"),
+    );
+
+    const begin = await runTransportBegin(b);
+    expect(begin.state).toBe("conflicts");
+    if (begin.state !== "conflicts") return;
+    expect(begin.conflicts).toEqual([
+      {
+        path: SKILL,
+        binary: false,
+        base: "base\n",
+        local: "edited on B\n",
+        remote: null,
+        localDeleted: false,
+        remoteDeleted: true,
+      },
+    ]);
+
+    const resolved = await runTransportResolve(b, {
+      files: [{ path: SKILL, side: "remote" }],
+    });
+    expect(resolved).toEqual({ resolved: [SKILL], remaining: [] });
+    await runTransportCommit(b, undefined);
+    expect(existsSync(homePath(b, SKILL))).toBe(false);
+    expect(readHome(b, ".claude/skills/other/SKILL.md")).toBe("other\n");
+
+    await fullSync(a);
+    expect(existsSync(homePath(a, SKILL))).toBe(false);
+  }, 60000);
+
+  it("deletes a path on an explicit delete, whichever side kept it", async () => {
+    const { b } = await divergeOn(
+      (a) => writeHome(a, SKILL, "edited on A\n"),
+      (b) => rmSync(homePath(b, ".claude/skills/review"), { recursive: true }),
+    );
+
+    const begin = await runTransportBegin(b);
+    expect(begin.state).toBe("conflicts");
+    if (begin.state !== "conflicts") return;
+    expect(begin.conflicts[0]).toMatchObject({
+      path: SKILL,
+      local: null,
+      remote: "edited on A\n",
+      localDeleted: true,
+      remoteDeleted: false,
+    });
+
+    await expectCode(
+      runTransportResolve(b, { files: [{ path: SKILL, delete: false }] }),
+      "invalid-input",
+    );
+    await expectCode(
+      runTransportResolve(b, { files: [{ path: SKILL, side: "local", delete: true }] }),
+      "invalid-input",
+    );
+    const resolved = await runTransportResolve(b, {
+      files: [{ path: SKILL, delete: true }],
+    });
+    expect(resolved.remaining).toEqual([]);
+    await runTransportCommit(b, undefined);
+    expect(existsSync(homePath(b, SKILL))).toBe(false);
+  }, 60000);
+
+  it("keeps the side that has a file when a pick takes it", async () => {
+    const { a, b } = await divergeOn(
+      (a) => writeHome(a, SKILL, "edited on A\n"),
+      (b) => rmSync(homePath(b, ".claude/skills/review"), { recursive: true }),
+    );
+
+    expect((await runTransportBegin(b)).state).toBe("conflicts");
+    await runTransportResolve(b, { files: [{ path: SKILL, side: "remote" }] });
+    await runTransportCommit(b, undefined);
+    expect(readHome(b, SKILL)).toBe("edited on A\n");
+    await fullSync(a);
+    expect(readHome(a, SKILL)).toBe("edited on A\n");
+  }, 60000);
+
+  it("checks the whole batch before applying any of it", async () => {
+    const { b } = await divergeOn(
+      (a) => {
+        writeHome(a, SKILL, "edited on A\n");
+        writeHome(a, ".claude/skills/other/SKILL.md", "other on A\n");
+      },
+      (b) => {
+        rmSync(homePath(b, ".claude/skills/review"), { recursive: true });
+        writeHome(b, ".claude/skills/other/SKILL.md", "other on B\n");
+      },
+    );
+    const begin = await runTransportBegin(b);
+    expect(begin.state).toBe("conflicts");
+    if (begin.state !== "conflicts") return;
+    expect(begin.conflicts.map(({ path }) => path)).toEqual([
+      ".claude/skills/other/SKILL.md",
+      SKILL,
+    ]);
+
+    // A valid first entry, then one naming no conflict: nothing is applied.
+    await expectCode(
+      runTransportResolve(b, {
+        files: [
+          { path: SKILL, side: "local" },
+          { path: ".claude/skills/nope.md", side: "local" },
+        ],
+      }),
+      "not-conflicted",
+    );
+    // The same path twice is refused as well.
+    await expectCode(
+      runTransportResolve(b, {
+        files: [
+          { path: SKILL, side: "local" },
+          { path: SKILL, delete: true },
+        ],
+      }),
+      "invalid-input",
+    );
+    const unmerged = execFileSync("git", ["-C", b.configDir, "ls-files", "-u"], {
+      encoding: "utf8",
+    });
+    expect(unmerged).toContain(SKILL);
+    expect(unmerged).toContain(".claude/skills/other/SKILL.md");
+
+    const resolved = await runTransportResolve(b, {
+      files: [
+        { path: SKILL, side: "local" },
+        { path: ".claude/skills/other/SKILL.md", content: "other merged\n" },
+      ],
+    });
+    expect(resolved.remaining).toEqual([]);
+  }, 60000);
+
+  it("settles a path both sides deleted without listing it", async () => {
+    const renamed = (to: string) => (deps: InternalDeps) => {
+      rmSync(homePath(deps, ".claude/skills/review"), { recursive: true });
+      writeHome(deps, `.claude/skills/${to}/SKILL.md`, "base\n");
+    };
+    const { b } = await divergeOn(renamed("review-a"), renamed("review-b"));
+
+    const begin = await runTransportBegin(b);
+    expect(begin.state).toBe("conflicts");
+    if (begin.state !== "conflicts") return;
+    // Each side renamed the skill its own way: the old name, which both
+    // deleted, is settled; the two new names remain, each held by one side.
+    expect(begin.conflicts.map(({ path }) => path)).toEqual([
+      ".claude/skills/review-a/SKILL.md",
+      ".claude/skills/review-b/SKILL.md",
+    ]);
+    expect(begin.conflicts[0]).toMatchObject({ localDeleted: true, remoteDeleted: false });
+    expect(begin.conflicts[1]).toMatchObject({ localDeleted: false, remoteDeleted: true });
+
+    const resolved = await runTransportResolve(b, {
+      files: [
+        { path: ".claude/skills/review-a/SKILL.md", side: "local" },
+        { path: ".claude/skills/review-b/SKILL.md", side: "local" },
+      ],
+    });
+    expect(resolved.remaining).toEqual([]);
+    await runTransportCommit(b, undefined);
+    expect(existsSync(homePath(b, ".claude/skills/review-a"))).toBe(false);
+    expect(readHome(b, ".claude/skills/review-b/SKILL.md")).toBe("base\n");
+    expect(existsSync(homePath(b, SKILL))).toBe(false);
+  }, 60000);
+
+  describe("a link on one side, a directory on the other", () => {
+    const GCLOUD = ".claude/skills/gcloud";
+
+    // B replaces the synced directory with a link while A edits a file in it.
+    async function divergeWithGcloud() {
+      const bare = makeBare();
+      const a = makeMachine(bare);
+      writeHome(a, `${GCLOUD}/SKILL.md`, "gcloud\n");
+      writeHome(a, `${GCLOUD}/ref.md`, "ref\n");
+      await fullSync(a);
+      const b = makeMachine(bare);
+      await fullSync(b);
+      writeHome(a, `${GCLOUD}/SKILL.md`, "gcloud on A\n");
+      await fullSync(a);
+      rmSync(homePath(b, GCLOUD), { recursive: true, force: true });
+      symlinkSync("../../.agents/skills/gcloud", homePath(b, GCLOUD));
+      return { a, b };
+    }
+
+    it.skipIf(process.platform === "win32")(
+      "reports one conflict on the path, and restores the link under its own name when picked",
+      async () => {
+        const { a, b } = await divergeWithGcloud();
+        const begin = await runTransportBegin(b);
+        expect(begin.state).toBe("conflicts");
+        if (begin.state !== "conflicts") return;
+        expect(begin.conflicts).toEqual([
+          {
+            path: GCLOUD,
+            binary: false,
+            base: null,
+            local: "../../.agents/skills/gcloud",
+            remote: null,
+            localDeleted: false,
+            remoteDeleted: false,
+            fileDirectory: {
+              fileSide: "local",
+              fileKind: "symlink",
+              directorySide: "remote",
+              directoryFiles: [`${GCLOUD}/SKILL.md`, `${GCLOUD}/ref.md`],
+            },
+          },
+        ]);
+
+        await expectCode(
+          runTransportResolve(b, { files: [{ path: GCLOUD, content: "x" }] }),
+          "invalid-resolution",
+        );
+        await expectCode(
+          runTransportResolve(b, { files: [{ path: `${GCLOUD}/SKILL.md`, side: "local" }] }),
+          "not-conflicted",
+        );
+
+        const resolved = await runTransportResolve(b, {
+          files: [{ path: GCLOUD, side: "local" }],
+        });
+        expect(resolved).toEqual({ resolved: [GCLOUD], remaining: [] });
+        const tracked = execFileSync(
+          "git",
+          ["-C", b.configDir, "ls-files", "-s", "--", ".claude/skills"],
+          { encoding: "utf8" },
+        );
+        expect(tracked).toMatch(/^120000 \S+ 0\t\.claude\/skills\/gcloud$/m);
+        expect(tracked).not.toContain("~");
+        expect(tracked).not.toContain(`${GCLOUD}/`);
+
+        await runTransportCommit(b, undefined);
+        expect(readlinkSync(homePath(b, GCLOUD))).toBe("../../.agents/skills/gcloud");
+
+        await fullSync(a);
+        expect(lstatSync(homePath(a, GCLOUD)).isSymbolicLink()).toBe(true);
+      },
+      60000,
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "keeps the directory, with the other side's edits, when it is picked",
+      async () => {
+        const { b } = await divergeWithGcloud();
+        expect((await runTransportBegin(b)).state).toBe("conflicts");
+
+        // The name git parked the link under answers for the conflict too.
+        const parked = execFileSync("git", ["-C", b.configDir, "ls-files", "-u"], {
+          encoding: "utf8",
+        }).match(/\.claude\/skills\/gcloud~\S+/)![0];
+        const resolved = await runTransportResolve(b, {
+          files: [{ path: parked, side: "remote" }],
+        });
+        expect(resolved).toEqual({ resolved: [GCLOUD], remaining: [] });
+
+        await runTransportCommit(b, undefined);
+        expect(lstatSync(homePath(b, GCLOUD)).isDirectory()).toBe(true);
+        expect(readHome(b, `${GCLOUD}/SKILL.md`)).toBe("gcloud on A\n");
+        expect(readHome(b, `${GCLOUD}/ref.md`)).toBe("ref\n");
+        expect(readdirSync(homePath(b, ".claude/skills"))).toEqual(["gcloud"]);
+      },
+      60000,
+    );
+  });
+});
+
+describe("transport with excludes", () => {
+  const SKILLS = ".claude/skills";
+
+  function trackedOnOrigin(deps: InternalDeps): string[] {
+    execFileSync("git", ["-C", deps.configDir, "fetch", "-q"], { stdio: "ignore" });
+    return execFileSync(
+      "git",
+      ["-C", deps.configDir, "ls-tree", "-r", "--name-only", "origin/main"],
+      { encoding: "utf8" },
+    )
+      .split("\n")
+      .filter(Boolean);
+  }
+
+  // What a git-agents without excludes did: commit whatever the home
+  // directory held. Written straight into the clone and pushed.
+  function commitAsOldVersion(deps: InternalDeps, files: Record<string, string>): void {
+    for (const [path, content] of Object.entries(files)) {
+      const target = join(deps.configDir, ...path.split("/"));
+      mkdirSync(join(target, ".."), { recursive: true });
+      writeFileSync(target, content, "utf8");
+    }
+    const run = (...args: string[]) =>
+      execFileSync(
+        "git",
+        ["-C", deps.configDir, "-c", "user.email=t@t", "-c", "user.name=t", ...args],
+        { stdio: "ignore" },
+      );
+    run("add", "-A", "--", ...Object.keys(files));
+    run("commit", "-m", "old version sync");
+    run("push", "-q", "origin", "HEAD");
+  }
+
+  const CLUTTER = {
+    [`${SKILLS}/.trash/old/SKILL.md`]: "old\n",
+    [`${SKILLS}/synced/manifest.json`]: "{\"round\":1}\n",
+    [`${SKILLS}/synced/.last-complete-round`]: "1\n",
+    [`${SKILLS}/synced/.staging/4242/SKILL.md`]: "staging\n",
+    [`${SKILLS}/synced/web-skill/SKILL.md`]: "web\n",
+    [`${SKILLS}/review/.DS_Store`]: "finder\n",
+  };
+
+  function writeClutter(deps: InternalDeps): void {
+    for (const [path, content] of Object.entries(CLUTTER)) writeHome(deps, path, content);
+  }
+
+  function expectClutter(deps: InternalDeps): void {
+    for (const [path, content] of Object.entries(CLUTTER)) {
+      expect(readHome(deps, path)).toBe(content);
+    }
+  }
+
+  it("never sends excluded files from the home directory", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeHome(a, `${SKILLS}/review/SKILL.md`, "review\n");
+    writeClutter(a);
+
+    const begin = await runTransportBegin(a);
+    expect(begin.state).toBe("clean");
+    if (begin.state !== "clean") return;
+    expect(begin.outgoing).toEqual([{ path: SKILLS, status: "added" }]);
+    expect(begin.firstSync).toEqual([]);
+    await runTransportCommit(a, undefined);
+
+    expect(trackedOnOrigin(a)).toEqual([`${SKILLS}/review/SKILL.md`]);
+    expectClutter(a);
+
+    const b = makeMachine(bare);
+    await fullSync(b);
+    expect(readdirSync(join(b.homeDir, ".claude", "skills"))).toEqual(["review"]);
+  }, 60000);
+
+  it("leaves excluded files in the home directory alone when changes come in", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeHome(a, `${SKILLS}/review/SKILL.md`, "review\n");
+    await fullSync(a);
+    const b = makeMachine(bare);
+    await fullSync(b);
+    writeClutter(b);
+
+    // An edit replaces the whole directory on B.
+    writeHome(a, `${SKILLS}/review/SKILL.md`, "review, edited\n");
+    await fullSync(a);
+    const begin = await runTransportBegin(b);
+    expect(begin.state).toBe("clean");
+    if (begin.state !== "clean") return;
+    expect(begin.outgoing).toEqual([]);
+    expect(begin.incoming).toEqual([{ path: SKILLS, status: "modified" }]);
+    await runTransportCommit(b, undefined);
+    expect(readHome(b, `${SKILLS}/review/SKILL.md`)).toBe("review, edited\n");
+    expectClutter(b);
+
+    // Deleting every skill deletes none of the excluded files, and the
+    // directory they keep is not taken for a skill folder to send back.
+    rmSync(join(a.homeDir, ".claude", "skills"), { recursive: true });
+    await fullSync(a);
+    await fullSync(b);
+    expect(existsSync(join(b.homeDir, ".claude", "skills", "review", "SKILL.md"))).toBe(false);
+    expectClutter(b);
+    const again = await runTransportBegin(b);
+    expect(again.state).toBe("clean");
+    if (again.state !== "clean") return;
+    expect(again.outgoing).toEqual([]);
+    expect(again.incoming).toEqual([]);
+    await runTransportCommit(b, undefined);
+  }, 90000);
+
+  it("drops excluded files an earlier version committed, and no home directory loses them", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeHome(a, `${SKILLS}/review/SKILL.md`, "review\n");
+    await fullSync(a);
+    const b = makeMachine(bare);
+    await fullSync(b);
+    // Both machines hold the clutter, and the old version committed it.
+    writeClutter(a);
+    writeClutter(b);
+    commitAsOldVersion(a, CLUTTER);
+    expect(trackedOnOrigin(a)).toContain(`${SKILLS}/synced/manifest.json`);
+
+    const begin = await runTransportBegin(a);
+    expect(begin.state).toBe("clean");
+    if (begin.state !== "clean") return;
+    expect(begin.excluded).toEqual([
+      `${SKILLS}/.trash`,
+      `${SKILLS}/review/.DS_Store`,
+      `${SKILLS}/synced`,
+    ]);
+    expect(begin.outgoing).toEqual([]);
+    await runTransportCommit(a, undefined);
+    expect(trackedOnOrigin(a)).toEqual([`${SKILLS}/review/SKILL.md`]);
+    expectClutter(a);
+
+    // Nothing is left to drop on the next run.
+    const next = await runTransportBegin(a);
+    expect(next.state === "clean" && next.excluded).toBeUndefined();
+    await runTransportCommit(a, undefined);
+
+    // B pulls the deletions; its own copies stay.
+    const pulled = await runTransportBegin(b);
+    expect(pulled.state).toBe("clean");
+    if (pulled.state !== "clean") return;
+    expect(pulled.incoming).toEqual([]);
+    expect(pulled.excluded).toBeUndefined();
+    await runTransportCommit(b, undefined);
+    expectClutter(b);
+    expect(readHome(b, `${SKILLS}/review/SKILL.md`)).toBe("review\n");
+  }, 90000);
+
+  it("settles conflicts on excluded files by dropping them from the sync repo", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeHome(a, `${SKILLS}/review/SKILL.md`, "review\n");
+    await fullSync(a);
+    commitAsOldVersion(a, CLUTTER);
+    const b = makeMachine(bare);
+    // B was synced by the old version too: its clone holds the clutter.
+    execFileSync("git", ["-C", b.configDir, "pull", "-q", "origin", "main"], {
+      stdio: "ignore",
+    });
+    // A, still on the old version, changes the clutter again.
+    commitAsOldVersion(a, {
+      [`${SKILLS}/synced/manifest.json`]: "{\"round\":2}\n",
+      [`${SKILLS}/.trash/old/SKILL.md`]: "older\n",
+    });
+    writeHome(b, `${SKILLS}/review/SKILL.md`, "review from B\n");
+
+    // B's migration deletes what A modified: modify/delete conflicts, none
+    // of which reaches the list.
+    const begin = await runTransportBegin(b);
+    expect(begin.state).toBe("clean");
+    if (begin.state !== "clean") return;
+    expect(begin.excluded).toEqual([
+      `${SKILLS}/.trash`,
+      `${SKILLS}/review/.DS_Store`,
+      `${SKILLS}/synced`,
+    ]);
+    await runTransportCommit(b, undefined);
+    expect(trackedOnOrigin(b)).toEqual([`${SKILLS}/review/SKILL.md`]);
+    expect(readHome(b, `${SKILLS}/review/SKILL.md`)).toBe("review from B\n");
+    expect(existsSync(join(b.homeDir, ".claude", "skills", "synced"))).toBe(false);
+  }, 90000);
+
+  it("applies the user's excludes file on every machine it reaches", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeHome(a, `${SKILLS}/review/SKILL.md`, "review\n");
+    writeHome(a, `${SKILLS}/review/notes/mine.md`, "notes of A\n");
+    await fullSync(a);
+    expect(trackedOnOrigin(a)).toContain(`${SKILLS}/review/notes/mine.md`);
+
+    writeFileSync(join(a.configDir, ".git-agents-excludes"), "# local notes\nnotes\n", "utf8");
+    const begin = await runTransportBegin(a);
+    expect(begin.state === "clean" && begin.excluded).toEqual([
+      `${SKILLS}/review/notes`,
+    ]);
+    await runTransportCommit(a, undefined);
+    expect(trackedOnOrigin(a)).toEqual([
+      `${SKILLS}/review/SKILL.md`,
+      ".git-agents-excludes",
+    ]);
+    expect(readHome(a, `${SKILLS}/review/notes/mine.md`)).toBe("notes of A\n");
+
+    const b = makeMachine(bare);
+    writeHome(b, `${SKILLS}/review/notes/theirs.md`, "notes of B\n");
+    await fullSync(b);
+    expect(readHome(b, `${SKILLS}/review/SKILL.md`)).toBe("review\n");
+    expect(readHome(b, `${SKILLS}/review/notes/theirs.md`)).toBe("notes of B\n");
+    expect(existsSync(join(b.homeDir, ".claude", "skills", "review", "notes", "mine.md"))).toBe(false);
+    expect(trackedOnOrigin(b)).not.toContain(`${SKILLS}/review/notes/theirs.md`);
+  }, 90000);
 });

@@ -83,6 +83,8 @@ The canonical directory itself is part of the sync repo and needs no entry here.
 
 Generated state, general settings, authentication data, caches, sessions, and managed installs outside the paths above are excluded. Everything inside a selected directory is treated as portable content, so keep machine-specific files outside it.
 
+Inside the selected directories, folders that a tool manages per machine are never synced, in either direction, and sync never overwrites or deletes them: `~/.claude/skills/synced/` (Claude Code's claude.ai skill sync), any `.trash/` or `.staging/` folder, `.DS_Store` files, and git-agents' own temporary `.<name>.git-agents-*` names. To exclude more, list patterns in `.git-agents-excludes` at the root of the sync repo clone (`~/.git-agents/`), one per line (`#` for comments): a name without a `/` matches at any depth (`notes`, `*.log`), a path with a `/` matches from your home directory (`.claude/skills/local-only`). The file is synced, so every machine applies it. Excluded files an earlier version committed leave the repo on the next sync; they stay in every home directory.
+
 On Windows, a selected leaf directory junction syncs the contents of its target. Pulling into an existing junction updates that target without replacing the junction. POSIX executable state is preserved for synced files.
 
 ## Custom harnesses

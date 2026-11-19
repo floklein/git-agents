@@ -23,6 +23,7 @@ import {
 } from "../utils/declaredPaths";
 import { pathKey } from "../utils/pathKey";
 import { measureSyncPath, type SyncPathSize } from "../utils/pathSize";
+import { excludesWithin, type ExcludeMatcher } from "../utils/excludes";
 import {
   applyRemoval,
   planRemoval,
@@ -30,7 +31,7 @@ import {
 } from "./declarationRemoval";
 import { InternalCommandError } from "./errors";
 import { NUL, git, isInWorktreeOrTracked, type GitResult } from "./git";
-import type { ConflictFile } from "./transport";
+import type { ConflictFile } from "./conflicts";
 
 // What transport does about the declarations file: committing a pending
 // change with the repo cleanup of a removal, comparing the remote's file with
@@ -290,13 +291,20 @@ export async function firstSyncListing(
 export function changedPathSize(
   changes: readonly { path: string; status: string }[],
   locate: (path: string) => string,
+  excludes?: ExcludeMatcher,
 ): SizeOf {
   const changed = new Set(
     changes
       .filter(({ status }) => status !== "removed")
       .map(({ path }) => path),
   );
-  return (path) => (changed.has(path) ? measureSyncPath(locate(path)) : null);
+  return (path) =>
+    changed.has(path)
+      ? measureSyncPath(
+          locate(path),
+          excludes && excludesWithin(excludes, path),
+        )
+      : null;
 }
 
 // The size of a path as a revision holds it, or null when it holds nothing
@@ -350,7 +358,17 @@ export async function invalidDeclarationsConflict(
   } catch {
     merged = null;
   }
-  return { path, binary: false, base, local, remote, merged, problems };
+  return {
+    path,
+    binary: false,
+    base,
+    local,
+    remote,
+    localDeleted: local === null,
+    remoteDeleted: remote === null,
+    merged,
+    problems,
+  };
 }
 
 // The refusal while a merge is open on an invalid declarations file. It names
@@ -369,12 +387,20 @@ export function invalidMergedDeclarationsError(
 
 // The declarations file is the one resolution that is validated, and the one
 // path accepted without a git conflict: while the merged file is invalid.
-// Nothing is written unless the resolution is valid.
-export async function resolveDeclarations(
+// Planning checks it and writes nothing; applying writes the plan. A batch
+// plans every resolution before it applies any.
+export type DeclarationsPlan = {
+  /** The revision whose file is taken whole, or null for given contents. */
+  rev: string | null;
+  /** The resulting file, or null for no file at all. */
+  content: string | null;
+};
+
+export async function planDeclarationsResolution(
   configDir: string,
-  file: { content?: string; side?: "local" | "remote" },
+  file: { content?: string; side?: "local" | "remote"; delete?: true },
   unmerged: UnmergedPaths,
-): Promise<void> {
+): Promise<DeclarationsPlan> {
   const path = HARNESS_DECLARATIONS_FILE;
   if (
     !unmerged.has(path) &&
@@ -390,7 +416,11 @@ export async function resolveDeclarations(
   const rev =
     file.side === undefined ? null : file.side === "local" ? "HEAD" : "MERGE_HEAD";
   const content =
-    rev === null ? file.content! : await fileAt(configDir, rev, path);
+    file.delete === true
+      ? null
+      : rev === null
+        ? file.content!
+        : await fileAt(configDir, rev, path);
   if (content !== null) {
     const declared = parseHarnessDeclarations(content);
     if (!declared.ok) {
@@ -402,14 +432,21 @@ export async function resolveDeclarations(
       );
     }
   }
+  return { rev, content };
+}
 
+export async function applyDeclarationsResolution(
+  configDir: string,
+  plan: DeclarationsPlan,
+): Promise<void> {
+  const path = HARNESS_DECLARATIONS_FILE;
   let staged: GitResult;
-  if (content === null) {
+  if (plan.content === null) {
     staged = await git(configDir, "rm", "-f", "-q", "--ignore-unmatch", "--", path);
-  } else if (rev !== null) {
-    staged = await git(configDir, "checkout", rev, "--", path);
+  } else if (plan.rev !== null) {
+    staged = await git(configDir, "checkout", plan.rev, "--", path);
   } else {
-    writeFileSync(join(configDir, path), content, "utf8");
+    writeFileSync(join(configDir, path), plan.content, "utf8");
     staged = await git(configDir, "add", "--", path);
   }
   if (!staged.ok) {

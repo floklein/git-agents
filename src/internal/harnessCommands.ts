@@ -15,6 +15,7 @@ import {
 } from "../utils/harnessDeclarations";
 import { buildHarnessSet, listDeclarationProblems } from "../utils/harnessSet";
 import { measureSyncPath } from "../utils/pathSize";
+import { excludesWithin, loadExcludes } from "../utils/excludes";
 import { unifiedDiff } from "../utils/textdiff";
 import {
   applyRemoval,
@@ -224,6 +225,7 @@ export function runHarnessStage(
     ? removalBetween(deps.configDir, current.harnesses, proposed.harnesses)
     : null;
 
+  const excludes = loadExcludes(deps.configDir);
   const result: HarnessStageResult = {
     file: {
       path: HARNESS_DECLARATIONS_FILE,
@@ -232,7 +234,10 @@ export function runHarnessStage(
     },
     startSyncing: pathsNotIn(proposed.harnesses, currentHarnesses).map(
       (entry) => {
-        const size = measureSyncPath(getLocalSyncPath(entry.path, deps.homeDir));
+        const size = measureSyncPath(
+          getLocalSyncPath(entry.path, deps.homeDir),
+          excludesWithin(excludes, entry.path),
+        );
         return {
           ...entry,
           present: size !== null,
