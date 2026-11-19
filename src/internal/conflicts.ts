@@ -114,14 +114,58 @@ export async function readUnmerged(configDir: string): Promise<UnmergedEntries> 
 async function pathsInside(
   configDir: string,
   directory: string,
-  rev: string | null,
+  rev: string,
 ): Promise<string[]> {
-  const result =
-    rev === null
-      ? await git(configDir, "ls-files", "-z", "--", `${directory}/`)
-      : await git(configDir, "ls-tree", "-r", "--name-only", "-z", rev, "--", `${directory}/`);
+  const result = await git(
+    configDir,
+    "ls-tree",
+    "-r",
+    "--name-only",
+    "-z",
+    rev,
+    "--",
+    `${directory}/`,
+  );
   if (!result.ok) throw failed(`Could not list ${directory}`, result.error);
   return [...new Set(result.output.split(NUL).filter(Boolean))].sort(byCodeUnit);
+}
+
+// What a revision holds at a path: its object type and id, or null.
+async function treeEntry(
+  configDir: string,
+  rev: string,
+  path: string,
+): Promise<{ type: string; sha: string } | null> {
+  const result = await git(configDir, "ls-tree", "-z", rev, "--", path);
+  if (!result.ok) throw failed(`Could not read ${path} at ${rev}`, result.error);
+  for (const entry of result.output.split(NUL)) {
+    const tab = entry.indexOf("\t");
+    if (tab === -1 || entry.slice(tab + 1) !== path) continue;
+    const [, type, sha] = entry.slice(0, tab).split(" ");
+    if (type && sha) return { type, sha };
+  }
+  return null;
+}
+
+// Whether git parked one side's file at `parked` because the other side has a
+// directory at `path`: that side's commit holds this very file at `path`, and
+// the other side's commit a directory there. The name alone proves nothing,
+// since any path may end in `~something`.
+async function isParkedFile(
+  configDir: string,
+  path: string,
+  fileSide: Side,
+  entry: StageEntry,
+): Promise<boolean> {
+  const [file, directory] = await Promise.all([
+    treeEntry(configDir, REV_OF[fileSide], path),
+    treeEntry(configDir, REV_OF[otherSide(fileSide)], path),
+  ]);
+  return (
+    file?.type === "blob" &&
+    file.sha === entry.sha &&
+    directory?.type === "tree"
+  );
 }
 
 /** The conflicts of the merge in progress, sorted by path. */
@@ -137,8 +181,9 @@ export async function readConflicts(
     const match = /^(.+)~[^/]+$/.exec(parked);
     if (match === null || stages.size !== 1 || stages.has(1)) continue;
     const path = match[1]!;
-    if ((await pathsInside(configDir, path, null)).length === 0) continue;
     const fileSide: Side = stages.has(2) ? "local" : "remote";
+    const fileEntry = stages.get(STAGE_OF[fileSide])!;
+    if (!(await isParkedFile(configDir, path, fileSide, fileEntry))) continue;
     const nested = [...entries.keys()].filter((nestedPath) =>
       nestedPath.startsWith(`${path}/`),
     );
@@ -154,7 +199,7 @@ export async function readConflicts(
       path,
       parked,
       fileSide,
-      fileEntry: stages.get(STAGE_OF[fileSide])!,
+      fileEntry,
       nested,
       directoryFiles,
     });

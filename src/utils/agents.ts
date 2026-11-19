@@ -137,6 +137,11 @@ function isVacant(root: string, path: string, exclude: PathFilter): boolean {
   });
 }
 
+/** Whether a directory holds excluded entries and nothing else of its own. */
+export function isVacantDirectory(path: string, exclude: PathFilter): boolean {
+  return isVacant(path, path, exclude);
+}
+
 /** Whether sync leaves an entry below `root` out: excluded, or vacant. */
 export function isLeftOut(
   root: string,

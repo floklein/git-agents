@@ -26,7 +26,10 @@ import {
 import {
   EXCLUDES_FILE,
   excludesWithin,
-  loadExcludes,
+  parseExcludes,
+  readUserExcludes,
+  unionOfExcludes,
+  withBuiltInExcludes,
   type ExcludeMatcher,
 } from "../utils/excludes";
 import { InternalCommandError, invalidInputError } from "./errors";
@@ -59,6 +62,7 @@ import {
   readBaseAndRemoteSets,
   remoteDeclarationChanges,
   removedListing,
+  fileAt,
   applyDeclarationsResolution,
   planDeclarationsResolution,
   type DeclarationsPlan,
@@ -99,6 +103,14 @@ type TransportState = {
   // an earlier run had already recorded that point. Abort restores the file
   // from it, so the declaration is kept all the same.
   declarations?: string;
+  // The user exclude patterns begin applied: this machine's and the remote's.
+  // Commit applies them too, beside the merged file's, so a pattern either
+  // side drops in this run still holds until the next run has sent what it
+  // used to hide; mirroring home can then never delete those files.
+  excludes?: string[];
+  // Begin completed the merge itself, because every conflict settled on its
+  // own; commit reports it as the merge it completed.
+  mergeCompletedByBegin?: boolean;
 };
 
 function writeTransportState(configDir: string, state: TransportState): void {
@@ -124,6 +136,16 @@ function readTransportState(configDir: string): TransportState | null {
       preHead: typeof state.preHead === "string" ? state.preHead : null,
       ...(typeof state.declarations === "string"
         ? { declarations: state.declarations }
+        : {}),
+      ...(Array.isArray(state.excludes)
+        ? {
+            excludes: state.excludes.filter(
+              (pattern: unknown): pattern is string => typeof pattern === "string",
+            ),
+          }
+        : {}),
+      ...(state.mergeCompletedByBegin === true
+        ? { mergeCompletedByBegin: true }
         : {}),
     };
   } catch {
@@ -299,12 +321,8 @@ async function mergedPaths(configDir: string): Promise<string[]> {
 
 // Every file of the merge in progress that needs a resolution: the ones git
 // could not merge, and the declarations file when it merged into something
-// invalid. The ones nobody needs to look at are settled first.
-async function conflictFiles(
-  configDir: string,
-  excludes: ExcludeMatcher,
-): Promise<ConflictFile[]> {
-  await autoResolveConflicts(configDir, excludes);
+// invalid. The caller settles the ones nobody needs to look at first.
+async function conflictFiles(configDir: string): Promise<ConflictFile[]> {
   const unmerged = await readUnmerged(configDir);
   const conflicts: ConflictFile[] = [];
   for (const conflict of await readConflicts(configDir, unmerged)) {
@@ -341,7 +359,9 @@ async function reopenMerge(configDir: string, localHead: string): Promise<void> 
 // paths are in neither list: nothing is synced there any more, and the files
 // in the home directory stay.
 // excluded names the excluded paths this run drops from the sync repo, and is
-// present only then. The files stay in every home directory.
+// present only then. The files stay in every home directory. autoResolved
+// names the conflicts settled without anyone looking (deleted on both sides,
+// or excluded), and is present only then.
 export type TransportBeginResult =
   | {
       state: "clean";
@@ -350,6 +370,7 @@ export type TransportBeginResult =
       firstSync: FirstSyncPath[];
       removed?: RemovedDeclarations;
       excluded?: string[];
+      autoResolved?: string[];
     }
   | {
       state: "conflicts";
@@ -359,12 +380,17 @@ export type TransportBeginResult =
       firstSync: FirstSyncPath[];
       removed?: RemovedDeclarations;
       excluded?: string[];
+      autoResolved?: string[];
     };
 
 // The optional `excluded` field of a begin result, present only when this
 // run drops something from the sync repo.
 function excludedIfAny(excluded: string[]): { excluded?: string[] } {
   return excluded.length === 0 ? {} : { excluded };
+}
+
+function autoResolvedIfAny(paths: readonly string[]): { autoResolved?: string[] } {
+  return paths.length === 0 ? {} : { autoResolved: [...paths].sort(byCodeUnit) };
 }
 
 // The optional `removed` field of a begin result, present only when there
@@ -419,6 +445,22 @@ export async function runTransportBegin(
   // Look before mirroring: a path the remote newly declares is mirrored in
   // this run, not the next one.
   const remoteTip = await fetchRemoteTip(deps.configDir);
+  // Either side's excludes hold for this run: one the remote just added
+  // keeps this machine from sending what it hides and settles the conflicts
+  // its removal causes, and one it just dropped hides nothing from this
+  // machine before its own files have gone out.
+  const excludePatterns = unionOfExcludes(
+    readUserExcludes(deps.configDir),
+    remoteTip === null
+      ? []
+      : parseExcludes((await fileAt(deps.configDir, remoteTip, EXCLUDES_FILE)) ?? ""),
+  );
+  writeTransportState(deps.configDir, {
+    ...readTransportState(deps.configDir)!,
+    excludes: excludePatterns,
+    mergeCompletedByBegin: false,
+  });
+  const excludes = withBuiltInExcludes(excludePatterns);
   const baseAndRemote = await readBaseAndRemoteSets(deps.configDir, remoteTip);
   const changes = remoteDeclarationChanges(baseAndRemote);
   // And a path the remote removed is not mirrored at all: its files stay in
@@ -440,9 +482,6 @@ export async function runTransportBegin(
     ? baseAndRemote.base
     : [...BUILT_IN_HARNESSES];
 
-  // This machine's list, as committed: the merge does not change what this
-  // run leaves out.
-  const excludes = loadExcludes(deps.configDir);
   const excluded = await dropExcludedFromClone(deps.configDir, syncPaths, excludes);
   const outgoing = mirrorChanged(deps, "outgoing", syncPaths, excludes);
   const outgoingSize = changedPathSize(
@@ -476,8 +515,10 @@ export async function runTransportBegin(
 
   // The conflicts state: a merge is in progress, and it needs resolutions
   // before transport-commit can complete it.
+  const autoResolved: string[] = [];
   const reportConflicts = async (): Promise<TransportBeginResult> => {
-    const conflicts = await conflictFiles(deps.configDir, excludes);
+    autoResolved.push(...(await autoResolveConflicts(deps.configDir, excludes)));
+    const conflicts = await conflictFiles(deps.configDir);
     // No merged declarations file to go by yet: the listing takes what either
     // side newly declares, and sizes the incoming side as the remote holds it.
     const incoming = (await mergedPaths(deps.configDir)).filter(
@@ -500,10 +541,11 @@ export async function runTransportBegin(
         const file = incoming.find((file) => isAtOrInside(file, path));
         return file === undefined
           ? null
-          : sizeAt(deps.configDir, "MERGE_HEAD", file.slice(0, path.length));
+          : sizeAt(deps.configDir, "MERGE_HEAD", file.slice(0, path.length), excludes);
       }),
-      ...removedIfAny(removedListing(baseAndRemote, null, deps.homeDir)),
+      ...removedIfAny(removedListing(baseAndRemote, null, deps.homeDir, excludes)),
       ...excludedIfAny(excluded),
+      ...autoResolvedIfAny(autoResolved),
     };
   };
 
@@ -535,7 +577,7 @@ export async function runTransportBegin(
     }
     // Conflicts nobody needs to see may be all there is: the merge then
     // completes as if git had seen none.
-    await autoResolveConflicts(deps.configDir, excludes);
+    autoResolved.push(...(await autoResolveConflicts(deps.configDir, excludes)));
     if ((await readUnmerged(deps.configDir)).size > 0) return reportConflicts();
     const completed = await git(deps.configDir, "commit", "--no-edit");
     if (!completed.ok) {
@@ -544,6 +586,10 @@ export async function runTransportBegin(
         `Could not complete the merge: ${completed.error ?? "unknown error"}. ${MID_TRANSPORT}`,
       );
     }
+    writeTransportState(deps.configDir, {
+      ...readTransportState(deps.configDir)!,
+      mergeCompletedByBegin: true,
+    });
   }
 
   // The merge may have brought a changed declarations file. From here the
@@ -579,8 +625,9 @@ export async function runTransportBegin(
         excludes,
       ),
     ),
-    ...removedIfAny(removedListing(baseAndRemote, mergedSet, deps.homeDir)),
+    ...removedIfAny(removedListing(baseAndRemote, mergedSet, deps.homeDir, excludes)),
     ...excludedIfAny(excluded),
+    ...autoResolvedIfAny(autoResolved),
   };
 }
 
@@ -589,13 +636,13 @@ const ResolveFileSchema = z
     path: z.string().min(1),
     content: z.string().optional(),
     side: z.enum(["local", "remote"]).optional(),
-    delete: z.literal(true).optional(),
+    delete: z.boolean().optional(),
   })
   .refine(
     (file) =>
-      [file.content, file.side, file.delete].filter((value) => value !== undefined)
-        .length === 1,
-    { message: "provide exactly one of content, side, or delete" },
+      [file.content !== undefined, file.side !== undefined, file.delete === true]
+        .filter(Boolean).length === 1,
+    { message: "provide exactly one of content, side, or delete: true" },
   );
 
 const ResolveInputSchema = z.object({
@@ -641,8 +688,10 @@ function conflictFor(conflicts: readonly Conflict[], path: string): Conflict {
   );
 }
 
-// Every resolution of the batch is checked before any is applied, so a bad
-// entry refuses the batch and leaves the merge as it was.
+// Every resolution of the batch is checked before any is applied, so an entry
+// that names no conflict, repeats one, or cannot settle its conflict refuses
+// the batch and leaves the merge as it was. A git failure while applying is
+// not undone: the error names what was already resolved.
 export async function runTransportResolve(
   deps: InternalDeps,
   rawInput: unknown,
@@ -693,13 +742,25 @@ export async function runTransportResolve(
 
   const resolved: string[] = [];
   for (const entry of planned) {
-    if (entry.kind === "declarations") {
-      await applyDeclarationsResolution(deps.configDir, entry.plan);
-      resolved.push(HARNESS_DECLARATIONS_FILE);
-    } else {
-      await applyResolution(deps.configDir, entry.conflict, entry.resolution);
-      resolved.push(entry.conflict.path);
+    try {
+      if (entry.kind === "declarations") {
+        await applyDeclarationsResolution(deps.configDir, entry.plan);
+      } else {
+        await applyResolution(deps.configDir, entry.conflict, entry.resolution);
+      }
+    } catch (error) {
+      if (!(error instanceof InternalCommandError) || resolved.length === 0) {
+        throw error;
+      }
+      throw new InternalCommandError(
+        error.code,
+        `${error.message}. Already resolved in this batch: ${resolved.join(", ")}; ` +
+          "the entries after the failing one were not applied. Resubmit the unresolved ones.",
+      );
     }
+    resolved.push(
+      entry.kind === "declarations" ? HARNESS_DECLARATIONS_FILE : entry.conflict.path,
+    );
   }
 
   return {
@@ -713,7 +774,11 @@ const CommitInputSchema = z
   .optional();
 
 export type TransportCommitResult = {
+  // A merge commit was made in this transport: by commit, or by begin when
+  // every conflict settled on its own.
   mergeCompleted: boolean;
+  // Excluded paths the merge brought into the repo, dropped again.
+  excluded?: string[];
   mirroredBack: PathChange[];
   pushed: boolean;
   // True only when the caller asked for deferPush: distinguishes a
@@ -730,7 +795,8 @@ export async function runTransportCommit(
   if (!parsed.success) throw invalidInputError("transport-commit", parsed.error);
   const deferPush = parsed.data?.deferPush === true;
 
-  if (readTransportState(deps.configDir) === null) {
+  const state = readTransportState(deps.configDir);
+  if (state === null) {
     throw new InternalCommandError(
       "no-transport",
       "No transport is in progress. Run transport-begin first.",
@@ -759,7 +825,51 @@ export async function runTransportCommit(
   }
   const syncPaths = set.harnesses.flatMap(harnessPaths);
 
-  let mergeCompleted = false;
+  // Begin's patterns and the merged file's: an exclude another machine added
+  // holds from here on, and one it dropped still holds in this run (see
+  // TransportState.excludes).
+  const excludes = withBuiltInExcludes(
+    unionOfExcludes(state.excludes ?? [], readUserExcludes(deps.configDir)),
+  );
+
+  // The merge may have brought excluded paths from a machine that still
+  // commits them: they leave the repo with the merge commit, or a commit of
+  // their own.
+  const excluded = await dropExcludedFromClone(deps.configDir, syncPaths, excludes);
+  if (excluded.length > 0) {
+    const unstaged = await git(
+      deps.configDir,
+      "rm",
+      "-r",
+      "-q",
+      "--cached",
+      "--ignore-unmatch",
+      "--",
+      ...excluded,
+    );
+    if (!unstaged.ok) {
+      throw new InternalCommandError(
+        "transport-failed",
+        `Could not drop excluded paths: ${unstaged.error ?? "unknown error"}`,
+      );
+    }
+    if (!merging) {
+      const committed = await git(
+        deps.configDir,
+        "commit",
+        "-m",
+        "sync: drop excluded paths",
+      );
+      if (!committed.ok) {
+        throw new InternalCommandError(
+          "transport-failed",
+          `Could not commit the excluded paths' removal: ${committed.error ?? "unknown error"}`,
+        );
+      }
+    }
+  }
+
+  let mergeCompleted = state.mergeCompletedByBegin === true;
   if (merging) {
     const committed = await git(deps.configDir, "commit", "--no-edit");
     if (!committed.ok) {
@@ -796,13 +906,17 @@ export async function runTransportCommit(
     pushed = true;
   }
 
-  // The merged list: an exclude another machine added holds from here on.
-  const excludes = loadExcludes(deps.configDir);
   const mirroredBack = mirrorChanged(deps, "incoming", syncPaths, excludes);
 
   writeLastSyncedPaths(deps, mirroredPaths(syncPaths, excludes), excludes);
   clearTransportState(deps.configDir);
-  return { mergeCompleted, mirroredBack, pushed, pushDeferred: deferPush };
+  return {
+    mergeCompleted,
+    mirroredBack,
+    pushed,
+    pushDeferred: deferPush,
+    ...excludedIfAny(excluded),
+  };
 }
 
 export type TransportAbortResult = { aborted: boolean; message: string };

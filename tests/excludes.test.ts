@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -169,6 +170,27 @@ describe("snapshots with excludes", () => {
     mkdirSync(empty);
     expect(snapshotSyncPath(empty, skillsExclude)).not.toBeNull();
   });
+});
+
+describe("measuring with excludes", () => {
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "measures without reading file contents",
+    () => {
+      const skills = join(useTmp(), "skills");
+      write(skills, "review/SKILL.md", "review\n");
+      write(skills, ".trash/x", "x\n");
+      const locked = join(skills, "review", "SKILL.md");
+      chmodSync(locked, 0o000);
+      try {
+        expect(measureSyncPath(skills, skillsExclude)).toEqual({
+          fileCount: 1,
+          totalBytes: "review\n".length,
+        });
+      } finally {
+        chmodSync(locked, 0o644);
+      }
+    },
+  );
 });
 
 describe("mirroring with excludes", () => {

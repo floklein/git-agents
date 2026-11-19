@@ -1918,6 +1918,48 @@ describe("transport conflicts on deleted paths", () => {
     expect(existsSync(homePath(b, SKILL))).toBe(false);
   }, 60000);
 
+  it("takes delete: false as no deletion", async () => {
+    const { b } = await divergeOn(
+      (a) => writeHome(a, SKILL, "edited on A\n"),
+      (b) => rmSync(homePath(b, ".claude/skills/review"), { recursive: true }),
+    );
+    expect((await runTransportBegin(b)).state).toBe("conflicts");
+    const resolved = await runTransportResolve(b, {
+      files: [{ path: SKILL, side: "remote", delete: false }],
+    });
+    expect(resolved.remaining).toEqual([]);
+  }, 60000);
+
+  it("never takes a path that merely ends in ~name for a file/directory conflict", async () => {
+    const { b } = await divergeOn(
+      (a) => {
+        rmSync(homePath(a, ".claude/skills/review"), { recursive: true });
+        writeHome(a, ".claude/skills/renamed.md", "base\n");
+      },
+      // A file named like git's parking name, beside the real `other/`.
+      (b) => {
+        rmSync(homePath(b, ".claude/skills/review"), { recursive: true });
+        writeHome(b, ".claude/skills/other~v2", "base\n");
+      },
+    );
+
+    const begin = await runTransportBegin(b);
+    expect(begin.state).toBe("conflicts");
+    if (begin.state !== "conflicts") return;
+    const parkedLike = begin.conflicts.find(
+      ({ path }) => path === ".claude/skills/other~v2",
+    );
+    expect(parkedLike).toMatchObject({ localDeleted: false, remoteDeleted: true });
+    expect(begin.conflicts.some(({ fileDirectory }) => fileDirectory)).toBe(false);
+
+    await runTransportResolve(b, {
+      files: begin.conflicts.map(({ path }) => ({ path, side: "local" as const })),
+    });
+    await runTransportCommit(b, undefined);
+    expect(readHome(b, ".claude/skills/other/SKILL.md")).toBe("other\n");
+    expect(readHome(b, ".claude/skills/other~v2")).toBe("base\n");
+  }, 60000);
+
   describe("a link on one side, a directory on the other", () => {
     const GCLOUD = ".claude/skills/gcloud";
 
@@ -2232,4 +2274,101 @@ describe("transport with excludes", () => {
     expect(existsSync(join(b.homeDir, ".claude", "skills", "review", "notes", "mine.md"))).toBe(false);
     expect(trackedOnOrigin(b)).not.toContain(`${SKILLS}/review/notes/theirs.md`);
   }, 90000);
+
+  it("never deletes home files a pattern another machine dropped used to hide", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeHome(a, `${SKILLS}/review/SKILL.md`, "review\n");
+    writeFileSync(join(a.configDir, ".git-agents-excludes"), "data\n", "utf8");
+    await fullSync(a);
+    const b = makeMachine(bare);
+    await fullSync(b);
+    writeHome(b, `${SKILLS}/review/data/local.json`, "{}\n");
+
+    // A drops the pattern and edits the skill, so the folder changes on B.
+    writeFileSync(join(a.configDir, ".git-agents-excludes"), "", "utf8");
+    writeHome(a, `${SKILLS}/review/SKILL.md`, "review, edited\n");
+    await fullSync(a);
+
+    await fullSync(b);
+    expect(readHome(b, `${SKILLS}/review/SKILL.md`)).toBe("review, edited\n");
+    expect(readHome(b, `${SKILLS}/review/data/local.json`)).toBe("{}\n");
+
+    // The next run sends what the pattern hid.
+    const next = await runTransportBegin(b);
+    expect(next.state === "clean" && next.outgoing).toEqual([
+      { path: SKILLS, status: "modified" },
+    ]);
+    await runTransportCommit(b, undefined);
+    expect(trackedOnOrigin(b)).toContain(`${SKILLS}/review/data/local.json`);
+  }, 90000);
+
+  it("applies an exclude the remote just added before anything conflicts", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeHome(a, `${SKILLS}/review/SKILL.md`, "review\n");
+    writeHome(a, `${SKILLS}/review/build/out.js`, "v1\n");
+    await fullSync(a);
+    const b = makeMachine(bare);
+    await fullSync(b);
+
+    writeFileSync(join(a.configDir, ".git-agents-excludes"), "build\n", "utf8");
+    const dropping = await runTransportBegin(a);
+    expect(dropping.state === "clean" && dropping.excluded).toEqual([
+      `${SKILLS}/review/build`,
+    ]);
+    await runTransportCommit(a, undefined);
+
+    writeHome(b, `${SKILLS}/review/build/out.js`, "v2 on B\n");
+    const begin = await runTransportBegin(b);
+    expect(begin.state).toBe("clean");
+    if (begin.state !== "clean") return;
+    expect(begin.outgoing).toEqual([]);
+    await runTransportCommit(b, undefined);
+    expect(readHome(b, `${SKILLS}/review/build/out.js`)).toBe("v2 on B\n");
+    expect(trackedOnOrigin(b)).not.toContain(`${SKILLS}/review/build/out.js`);
+  }, 90000);
+
+  it("reports a merge begin completed itself, and drops what a merge brings in", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeHome(a, `${SKILLS}/review/SKILL.md`, "review\n");
+    await fullSync(a);
+    commitAsOldVersion(a, CLUTTER);
+    const b = makeMachine(bare);
+    execFileSync("git", ["-C", b.configDir, "pull", "-q", "origin", "main"], {
+      stdio: "ignore",
+    });
+    commitAsOldVersion(a, {
+      [`${SKILLS}/synced/manifest.json`]: "{\"round\":2}\n",
+      [`${SKILLS}/review/node_modules/dep/index.js`]: "dep\n",
+    });
+    writeHome(b, `${SKILLS}/review/SKILL.md`, "review from B\n");
+
+    const begin = await runTransportBegin(b);
+    expect(begin.state).toBe("clean");
+    if (begin.state !== "clean") return;
+    expect(begin.autoResolved).toEqual([`${SKILLS}/synced/manifest.json`]);
+
+    const commit = await runTransportCommit(b, undefined);
+    expect(commit.mergeCompleted).toBe(true);
+    expect(commit.excluded).toEqual([`${SKILLS}/review/node_modules`]);
+    expect(trackedOnOrigin(b)).toEqual([`${SKILLS}/review/SKILL.md`]);
+    expect(existsSync(join(b.homeDir, ".claude", "skills", "review", "node_modules"))).toBe(false);
+  }, 90000);
+
+  it("reports a whole excluded sync path in status", async () => {
+    const bare = makeBare();
+    const a = makeMachine(bare);
+    writeHome(a, ".cursor/skills/x/SKILL.md", "x\n");
+    writeFileSync(join(a.configDir, ".git-agents-excludes"), ".cursor/skills\n", "utf8");
+    const status = await runInternalCommand("status", undefined, a);
+    expect(status.ok).toBe(true);
+    const report = (status as { result: StatusReport }).result;
+    const cursor = report.harnesses.find(({ id }) => id === "cursor")!;
+    expect(cursor.syncPaths.find(({ syncPath }) => syncPath === ".cursor/skills")).toMatchObject({
+      present: true,
+      excluded: true,
+    });
+  }, 30000);
 });

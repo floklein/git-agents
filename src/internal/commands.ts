@@ -68,6 +68,8 @@ type SyncPathReport = {
   syncPath: string;
   path: string;
   present: boolean;
+  // The whole path matches an exclude: it is not synced, whatever is there.
+  excluded?: true;
   kind?: SyncPathSnapshot["kind"];
   fileCount?: number;
   contentHash?: string;
@@ -190,9 +192,10 @@ function runStatus(deps: InternalDeps): StatusReport {
       : {}),
     syncPaths: harnessPaths(harness).map((syncPath): SyncPathReport => {
       const path = getLocalSyncPath(syncPath, deps.homeDir);
-      const snapshot = excludes(syncPath)
-        ? null
-        : snapshotSyncPath(path, excludesWithin(excludes, syncPath));
+      if (excludes(syncPath)) {
+        return { syncPath, path, present: existsSync(path), excluded: true };
+      }
+      const snapshot = snapshotSyncPath(path, excludesWithin(excludes, syncPath));
       return snapshot
         ? {
             syncPath,

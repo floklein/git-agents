@@ -1,6 +1,6 @@
 import { lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { resolve } from "node:path";
-import { isLeftOut, snapshotSyncPath } from "./agents";
+import { isLeftOut, isVacantDirectory } from "./agents";
 import type { PathFilter } from "./excludes";
 
 export type SyncPathSize = {
@@ -21,7 +21,9 @@ export function measureSyncPath(
   path: string,
   exclude?: PathFilter,
 ): SyncPathSize | null {
-  if (exclude && snapshotSyncPath(path, exclude) === null) return null;
+  // A directory link is measured as the directory it points at, so it is
+  // never vacant itself: only a real directory can be.
+  if (exclude && isVacantDirectory(path, exclude)) return null;
   const size: SyncPathSize = { fileCount: 0, totalBytes: 0 };
   return measure(path, path, size, new Set(), exclude) ? size : null;
 }

@@ -136,9 +136,19 @@ export function readUserExcludes(configDir: string): string[] {
   }
 }
 
+/** The built-in excludes plus the given user patterns. */
+export function withBuiltInExcludes(userPatterns: readonly string[]): ExcludeMatcher {
+  return compileExcludes([...BUILT_IN_EXCLUDES, ...userPatterns]);
+}
+
 /** The built-in excludes plus the user's own, from the sync repo. */
 export function loadExcludes(configDir: string): ExcludeMatcher {
-  return compileExcludes([...BUILT_IN_EXCLUDES, ...readUserExcludes(configDir)]);
+  return withBuiltInExcludes(readUserExcludes(configDir));
+}
+
+/** Patterns of several lists, each once, in first-seen order. */
+export function unionOfExcludes(...lists: readonly (readonly string[])[]): string[] {
+  return [...new Set(lists.flat())];
 }
 
 /** The matcher seen from inside a sync path. */

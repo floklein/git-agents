@@ -133,7 +133,7 @@ export async function restoreDeclarations(
 }
 
 // A file as a revision holds it, or null when the revision has no such file.
-async function fileAt(
+export async function fileAt(
   configDir: string,
   rev: string,
   path: string,
@@ -235,6 +235,7 @@ export function removedListing(
   sets: BaseAndRemoteSets,
   merged: readonly Harness[] | null,
   homeDir: string,
+  excludes?: ExcludeMatcher,
 ): RemovedDeclarations | undefined {
   if (sets.remote === null) return undefined;
   const remaining = [sets.remote, ...(merged === null ? [] : [merged])];
@@ -253,7 +254,11 @@ export function removedListing(
     .map(
       (entry): RemovedPath => ({
         ...namedPath(entry),
-        present: measureSyncPath(getLocalSyncPath(entry.path, homeDir)) !== null,
+        present:
+          measureSyncPath(
+            getLocalSyncPath(entry.path, homeDir),
+            excludes && excludesWithin(excludes, entry.path),
+          ) !== null,
       }),
     );
   return harnesses.length === 0 && paths.length === 0
@@ -313,6 +318,7 @@ export async function sizeAt(
   configDir: string,
   rev: string,
   path: string,
+  excludes?: ExcludeMatcher,
 ): Promise<SyncPathSize | null> {
   const listed = await git(configDir, "ls-tree", "-r", "-l", "-z", rev, "--", path);
   if (!listed.ok) return null;
@@ -320,6 +326,7 @@ export async function sizeAt(
   const sizes = listed.output
     .split(NUL)
     .filter(Boolean)
+    .filter((entry) => !excludes?.(entry.slice(entry.indexOf("\t") + 1)))
     .map((entry) => Number(entry.split("\t")[0]!.split(/ +/)[3]) || 0);
   if (sizes.length === 0) return null;
   return {
@@ -398,7 +405,7 @@ export type DeclarationsPlan = {
 
 export async function planDeclarationsResolution(
   configDir: string,
-  file: { content?: string; side?: "local" | "remote"; delete?: true },
+  file: { content?: string; side?: "local" | "remote"; delete?: boolean },
   unmerged: UnmergedPaths,
 ): Promise<DeclarationsPlan> {
   const path = HARNESS_DECLARATIONS_FILE;
